@@ -12,9 +12,10 @@ dist
 media/*.wav
 media/*.ogg
 
-# Sorties décodées depuis library/ + manifeste généré (régénérables via
-# `npm run library:import`).
+# Manifeste catalogué + cache des rendus à la demande (régénérables :
+# `npm run library:import` pour le manifeste, le cache se remplit à la lecture).
 media/_decoded/
+media/_cache/
 media/library.generated.json
 
 # Bibliothèque locale : vrais fichiers VGM déposés (souvent copyrightés) —

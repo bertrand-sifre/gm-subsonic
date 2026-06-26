@@ -1,29 +1,28 @@
 /**
  * tools/import-library.mjs
  *
- * Importe les vrais fichiers de musique de jeu déposés dans `library/` en les
- * décodant côté serveur via ffmpeg + libgme (NSF, SPC, VGM, GBS, trackers…).
+ * Catalogue les vrais fichiers de musique de jeu déposés dans `library/`
+ * (NSF, NSFe, SPC, VGM, GBS, trackers…) via ffprobe + libgme.
  *
- * Ces formats sont émulés/séquencés et INFINIS : le navigateur ne sait pas les
- * lire. On les « rend » donc en OGG fini côté serveur — borné par une durée +
- * un fondu de sortie (exactement le pilier « rendu serveur » de la tranche 3).
- * Un même fichier (ex. un NSF) contient plusieurs SOUS-PISTES : chacune devient
- * un morceau, sélectionnée via l'option `track_index` du demuxer libgme.
+ * On NE décode PLUS ici : ces formats sont émulés et infinis, et le rendu en
+ * OGG se fait désormais À LA DEMANDE côté serveur, avec la durée + le fondu
+ * choisis par l'utilisateur (`/api/stream/:id?seconds=&fade=`). L'import se
+ * contente donc de lire les métadonnées par sous-piste :
+ *   - nom de piste (tag `song`, présent dans les NSFe via le chunk tlbl) ;
+ *   - durée voulue par le ripper (chunk `time` du NSFe) -> défaut de lecture ;
+ *   - jeu / auteur / système (tags globaux).
  *
- * Sortie :
- *   - media/_decoded/<jeu>-<NN>.ogg          (audio rendu)
- *   - media/library.generated.json           (manifeste lu par le serveur)
+ * Sortie : media/library.generated.json (manifeste lu par le serveur), avec
+ * pour chaque entrée une référence à la SOURCE + l'index de sous-piste.
  *
  * Réglages (env) :
- *   VDM_RENDER_SECONDS (défaut 75)  durée rendue par sous-piste
- *   VDM_FADE_SECONDS   (défaut 3)   fondu de sortie
- *   VDM_MAX_TRACKS     (défaut 0)   limite de sous-pistes par fichier (0 = toutes)
+ *   VDM_FALLBACK_SECONDS (défaut 120)  durée par défaut si la source n'en donne pas
  *
  * Usage :  node tools/import-library.mjs   (ou  npm run library:import)
  */
 
 import { spawn } from 'node:child_process';
-import { mkdir, readdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import { dirname, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -31,14 +30,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 const LIBRARY_DIR = join(ROOT, 'library');
 const MEDIA_DIR = join(ROOT, 'media');
-const OUT_DIR = join(MEDIA_DIR, '_decoded');
 const MANIFEST = join(MEDIA_DIR, 'library.generated.json');
 
-const SR = 44100;
-const RENDER_SECONDS = Number(process.env.VDM_RENDER_SECONDS ?? 75);
-const FADE_SECONDS = Number(process.env.VDM_FADE_SECONDS ?? 3);
-const MAX_TRACKS = Number(process.env.VDM_MAX_TRACKS ?? 0);
-const CONCURRENCY = 4;
+const FALLBACK_SECONDS = Number(process.env.VDM_FALLBACK_SECONDS ?? 120);
+const CONCURRENCY = 6;
 
 /** Formats émulés/séquencés gérés par le demuxer libgme de ffmpeg. */
 const VGM_EXT = new Set([
@@ -49,7 +44,7 @@ function slugify(value) {
   return value
     .toLowerCase()
     .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '') // retire les diacritiques
+    .replace(/[̀-ͯ]/g, '')
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/(^-|-$)/g, '');
 }
@@ -73,16 +68,14 @@ function run(cmd, args) {
   });
 }
 
-/** Lit les tags de format (jeu, auteur, système, nombre de pistes) via ffprobe. */
-async function probe(file) {
+/** Tags globaux (jeu, auteur, système, nombre de pistes). */
+async function probeGlobal(file) {
   const { stdout } = await run('ffprobe', [
     '-hide_banner', '-loglevel', 'error',
     '-f', 'libgme', '-i', file,
-    '-show_entries', 'format=format_name:format_tags',
-    '-of', 'json',
+    '-show_entries', 'format_tags', '-of', 'json',
   ]);
-  const fmt = JSON.parse(stdout).format ?? {};
-  const tags = fmt.tags ?? {};
+  const tags = (JSON.parse(stdout).format ?? {}).tags ?? {};
   const trackCount = Number(tags.tracks);
   return {
     game: tags.game,
@@ -92,24 +85,22 @@ async function probe(file) {
   };
 }
 
-/** Rend une sous-piste en OGG (durée bornée + fondu de sortie). */
-async function decodeTrack(file, index, outPath) {
-  const fadeStart = Math.max(0, RENDER_SECONDS - FADE_SECONDS);
-  await run('ffmpeg', [
-    '-hide_banner', '-loglevel', 'error', '-y',
-    '-f', 'libgme', '-track_index', String(index), '-sample_rate', String(SR),
-    '-i', file,
-    '-t', String(RENDER_SECONDS),
-    '-af', `afade=t=out:st=${fadeStart}:d=${FADE_SECONDS}`,
-    '-c:a', 'libvorbis', '-qscale:a', '5',
-    outPath,
+/** Métadonnées d'une sous-piste : durée voulue + nom. */
+async function probeTrack(file, index) {
+  const { stdout } = await run('ffprobe', [
+    '-hide_banner', '-loglevel', 'error',
+    '-f', 'libgme', '-track_index', String(index), '-i', file,
+    '-show_entries', 'format=duration:format_tags=song', '-of', 'json',
   ]);
-  const { size } = await stat(outPath);
-  if (size === 0) throw new Error(`OGG vide pour ${file} #${index}`);
-  return size;
+  const fmt = JSON.parse(stdout).format ?? {};
+  const dur = Number(fmt.duration);
+  return {
+    seconds: Number.isFinite(dur) && dur > 0 ? dur : FALLBACK_SECONDS,
+    name: fmt.tags?.song,
+  };
 }
 
-/** Petit pool de concurrence (évite de lancer 60 ffmpeg d'un coup). */
+/** Petit pool de concurrence pour les ffprobe par piste. */
 async function pool(items, size, worker) {
   const out = new Array(items.length);
   let i = 0;
@@ -123,60 +114,51 @@ async function pool(items, size, worker) {
   return out;
 }
 
-async function importFile(file, fileName) {
-  const meta = await probe(file);
+async function catalogFile(fileName) {
+  const filePath = join(LIBRARY_DIR, fileName);
+  const meta = await probeGlobal(filePath);
   const game = meta.game ?? fileName.replace(/\.[^.]+$/, '');
-  const base = slugify(game);
-  const total = MAX_TRACKS > 0 ? Math.min(MAX_TRACKS, meta.trackCount) : meta.trackCount;
+  const base = slugify(fileName); // inclut l'extension -> id unique .nsf vs .nsfe
 
   console.log(
-    `[import] ${fileName} → ${total}/${meta.trackCount} piste(s) | jeu="${game}" ` +
+    `[catalogue] ${fileName} → ${meta.trackCount} piste(s) | jeu="${game}" ` +
     `auteur="${meta.composer ?? '?'}" système="${meta.platform ?? '?'}"`
   );
 
-  const indices = Array.from({ length: total }, (_, i) => i);
-  const entries = await pool(indices, CONCURRENCY, async (index) => {
+  const indices = Array.from({ length: meta.trackCount }, (_, i) => i);
+  return pool(indices, CONCURRENCY, async (index) => {
     const nn = String(index + 1).padStart(2, '0');
-    const outName = `${base}-${nn}.ogg`;
-    const outPath = join(OUT_DIR, outName);
-    try {
-      // Incrémental : on ne re-décode pas un OGG déjà présent (non vide).
-      const existing = await stat(outPath).catch(() => null);
-      let size;
-      if (existing && existing.size > 0) {
-        size = existing.size;
-        process.stdout.write(`  ↻ ${outName} (déjà décodé)\n`);
-      } else {
-        size = await decodeTrack(file, index, outPath);
-        process.stdout.write(`  ✓ ${outName} (${(size / 1024).toFixed(0)} Ko)\n`);
-      }
-      return {
-        file: `_decoded/${outName}`,
-        title: `Piste ${nn}`,
-        game,
-        composer: meta.composer,
-        platform: meta.platform,
-      };
-    } catch (err) {
-      process.stdout.write(`  ✗ piste ${nn} : ${err.message}\n`);
-      return null;
-    }
+    const { seconds, name } = await probeTrack(filePath, index);
+    const defaultSeconds = Math.round(seconds);
+    // Fondu par défaut seulement pour les pistes longues (les jingles courts
+    // finissent d'eux-mêmes). L'utilisateur peut le changer dans l'UI.
+    const defaultFade = defaultSeconds >= 20 ? 4 : 0;
+    return {
+      id: `${base}-${nn}`,
+      source: fileName,
+      trackIndex: index,
+      title: name || `Piste ${nn}`,
+      game,
+      composer: meta.composer,
+      platform: meta.platform,
+      defaultSeconds,
+      defaultFade,
+    };
   });
-  return entries.filter(Boolean);
 }
 
 async function main() {
-  await mkdir(OUT_DIR, { recursive: true });
+  await mkdir(MEDIA_DIR, { recursive: true });
 
   let files;
   try {
     files = (await readdir(LIBRARY_DIR)).filter((f) => VGM_EXT.has(extname(f).toLowerCase()));
   } catch {
-    console.error(`[import] dossier introuvable : ${LIBRARY_DIR}`);
+    console.error(`[catalogue] dossier introuvable : ${LIBRARY_DIR}`);
     process.exit(1);
   }
   if (files.length === 0) {
-    console.log(`[import] aucun fichier VGM dans ${LIBRARY_DIR}. Rien à faire.`);
+    console.log(`[catalogue] aucun fichier VGM dans ${LIBRARY_DIR}.`);
     await writeFile(MANIFEST, JSON.stringify({ tracks: [] }, null, 2));
     return;
   }
@@ -184,19 +166,17 @@ async function main() {
   const allTracks = [];
   for (const fileName of files) {
     try {
-      const tracks = await importFile(join(LIBRARY_DIR, fileName), fileName);
-      allTracks.push(...tracks);
+      allTracks.push(...(await catalogFile(fileName)));
     } catch (err) {
-      console.error(`[import] ${fileName} ignoré : ${err.message}`);
+      console.error(`[catalogue] ${fileName} ignoré : ${err.message}`);
     }
   }
 
   await writeFile(MANIFEST, JSON.stringify({ tracks: allTracks }, null, 2));
-  console.log(`[import] terminé : ${allTracks.length} morceau(x) → ${MANIFEST}`);
-  console.log('[import] redémarre le serveur pour recharger : docker compose restart app');
+  console.log(`[catalogue] terminé : ${allTracks.length} morceau(x) → ${MANIFEST}`);
 }
 
 main().catch((err) => {
-  console.error('[import] échec :', err.message);
+  console.error('[catalogue] échec :', err.message);
   process.exit(1);
 });

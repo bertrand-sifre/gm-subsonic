@@ -33,10 +33,13 @@ export class LoopPlayer {
     return this.ctx;
   }
 
-  /** Télécharge et décode le fichier audio du morceau. */
-  async load(track: Track): Promise<void> {
+  /**
+   * Télécharge et décode le fichier audio du morceau. `streamUrl` permet de
+   * surcharger l'URL (ex. paramètres de rendu serveur `?seconds=&fade=`).
+   */
+  async load(track: Track, streamUrl: string = track.streamUrl): Promise<void> {
     const ctx = this.ensureContext();
-    const res = await fetch(track.streamUrl);
+    const res = await fetch(streamUrl);
     if (!res.ok) throw new Error(`stream ${track.id}: HTTP ${res.status}`);
     const data = await res.arrayBuffer();
     this.buffer = await ctx.decodeAudioData(data);

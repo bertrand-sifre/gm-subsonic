@@ -1,17 +1,25 @@
+import { spawn } from 'node:child_process';
 import { createReadStream } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { mkdir, stat } from 'node:fs/promises';
 import { dirname, extname, join } from 'node:path';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
-import { scanLibrary, type ScanResult } from './library.js';
+import { scanLibrary, type RenderRef, type ScanResult } from './library.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-// apps/server/src -> racine du dépôt -> media/
-const MEDIA_DIR = join(__dirname, '../../../media');
+// apps/server/src -> racine du dépôt
+const ROOT = join(__dirname, '../../..');
+const MEDIA_DIR = join(ROOT, 'media');
+const LIBRARY_DIR = join(ROOT, 'library');
+const CACHE_DIR = join(MEDIA_DIR, '_cache'); // OGG rendus à la demande
 const PORT = Number(process.env.PORT ?? 8787);
+
+// Garde-fous du rendu paramétrable.
+const MAX_SECONDS = 900;
+const MAX_FADE = 30;
 
 const CONTENT_TYPES: Record<string, string> = {
   '.wav': 'audio/wav',
@@ -31,22 +39,106 @@ app.get('/api/health', (c) => c.json({ ok: true }));
 app.get('/api/library', (c) => c.json(scan.library));
 
 /**
- * Streaming d'un fichier audio avec support des requêtes Range (HTTP 206).
- * Le client Web Audio télécharge le fichier entier, mais Range reste utile
- * pour les lecteurs `<audio>` classiques et la future compat Subsonic.
+ * Streaming d'un morceau.
+ *  - statique : on sert le fichier tel quel (Range/206) ;
+ *  - émulé : on rend l'OGG à la demande via libgme avec la durée + le fondu
+ *    demandés (`?seconds=&fade=`), puis on sert depuis le cache.
  */
 app.get('/api/stream/:id', async (c) => {
   const id = c.req.param('id');
-  const filePath = scan.files.get(id);
-  if (!filePath) return c.notFound();
 
+  const staticPath = scan.files.get(id);
+  if (staticPath) return serveFile(c, staticPath);
+
+  const ref = scan.renders.get(id);
+  if (ref) {
+    const seconds = clamp(numParam(c, 'seconds', ref.defaultSeconds), 1, MAX_SECONDS);
+    const fade = clamp(numParam(c, 'fade', ref.defaultFade), 0, MAX_FADE);
+    try {
+      const rendered = await ensureRendered(id, ref, Math.round(seconds), round1(fade));
+      return serveFile(c, rendered);
+    } catch (err) {
+      console.error(`[vdm] rendu échoué (${id}):`, err);
+      return c.text('render failed', 500);
+    }
+  }
+
+  return c.notFound();
+});
+
+function numParam(c: Context, name: string, fallback: number): number {
+  const raw = c.req.query(name);
+  const n = raw == null ? NaN : Number(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, v));
+}
+
+function round1(v: number): number {
+  return Math.round(v * 10) / 10;
+}
+
+// ---- Rendu à la demande (formats émulés) -----------------------------------
+
+const inflight = new Map<string, Promise<void>>();
+
+/** Garantit l'existence de l'OGG rendu (cache) et renvoie son chemin. */
+async function ensureRendered(
+  id: string,
+  ref: RenderRef,
+  seconds: number,
+  fade: number
+): Promise<string> {
+  const outPath = join(CACHE_DIR, `${id}__s${seconds}__f${String(fade).replace('.', 'p')}.ogg`);
+
+  const existing = await stat(outPath).catch(() => null);
+  if (existing && existing.size > 0) return outPath;
+
+  // Dédoublonne les rendus identiques concurrents.
+  let pending = inflight.get(outPath);
+  if (!pending) {
+    pending = renderTrack(ref, seconds, fade, outPath).finally(() => inflight.delete(outPath));
+    inflight.set(outPath, pending);
+  }
+  await pending;
+  return outPath;
+}
+
+/** Rend une sous-piste émulée en OGG (durée bornée + fondu) via ffmpeg/libgme. */
+function renderTrack(ref: RenderRef, seconds: number, fade: number, outPath: string): Promise<void> {
+  const args = [
+    '-hide_banner', '-loglevel', 'error', '-y',
+    '-f', 'libgme', '-track_index', String(ref.trackIndex), '-sample_rate', '44100',
+    '-i', ref.sourcePath,
+    '-t', String(seconds),
+  ];
+  if (fade > 0) {
+    args.push('-af', `afade=t=out:st=${Math.max(0, seconds - fade)}:d=${fade}`);
+  }
+  args.push('-c:a', 'libvorbis', '-qscale:a', '5', outPath);
+
+  return new Promise((resolve, reject) => {
+    const child = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('error', reject);
+    child.on('close', (code) =>
+      code === 0 ? resolve() : reject(new Error(`ffmpeg (code ${code}) : ${stderr.trim()}`))
+    );
+  });
+}
+
+// ---- Service de fichier avec Range (RFC 7233) ------------------------------
+
+async function serveFile(c: Context, filePath: string): Promise<Response> {
   const { size } = await stat(filePath);
   const contentType = CONTENT_TYPES[extname(filePath).toLowerCase()] ?? 'application/octet-stream';
   const range = c.req.header('range');
 
   if (range) {
     const match = /bytes=(\d*)-(\d*)/.exec(range);
-    // Plage vide/illisible : non satisfiable.
     if (!match || (!match[1] && !match[2])) {
       return c.body(null, 416, { 'Content-Range': `bytes */${size}` });
     }
@@ -54,16 +146,12 @@ app.get('/api/stream/:id', async (c) => {
     let start: number;
     let end: number;
     if (!match[1]) {
-      // Suffix-range `bytes=-N` : les N derniers octets (clampé à 0).
       const suffix = Number(match[2]);
-      if (suffix === 0) {
-        return c.body(null, 416, { 'Content-Range': `bytes */${size}` });
-      }
+      if (suffix === 0) return c.body(null, 416, { 'Content-Range': `bytes */${size}` });
       start = Math.max(0, size - suffix);
       end = size - 1;
     } else {
       start = Number(match[1]);
-      // Borne de fin tronquée à size-1 (RFC 7233) plutôt que de renvoyer 416.
       end = match[2] ? Math.min(Number(match[2]), size - 1) : size - 1;
     }
 
@@ -80,18 +168,17 @@ app.get('/api/stream/:id', async (c) => {
     });
   }
 
-  // Pas de Range : fichier entier. Readable.toWeb gère la backpressure
-  // (lecture disque pilotée par le drainage du socket) et l'annulation.
   return c.body(Readable.toWeb(createReadStream(filePath)) as ReadableStream, 200, {
     'Content-Type': contentType,
     'Accept-Ranges': 'bytes',
     'Content-Length': String(size),
   });
-});
+}
 
 async function main() {
-  scan = await scanLibrary(MEDIA_DIR);
-  const count = scan.files.size;
+  await mkdir(CACHE_DIR, { recursive: true });
+  scan = await scanLibrary(MEDIA_DIR, LIBRARY_DIR);
+  const count = scan.files.size + scan.renders.size;
   console.log(`[vdm] bibliothèque chargée : ${count} morceau(x), ${scan.library.games.length} jeu(x)`);
   serve({ fetch: app.fetch, port: PORT }, ({ port }) => {
     console.log(`[vdm] serveur en écoute sur http://localhost:${port}`);
