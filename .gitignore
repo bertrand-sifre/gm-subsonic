@@ -11,3 +11,14 @@ dist
 # Seul media/meta.json (la source) est versionné.
 media/*.wav
 media/*.ogg
+
+# Sorties décodées depuis library/ + manifeste généré (régénérables via
+# `npm run library:import`).
+media/_decoded/
+media/library.generated.json
+
+# Bibliothèque locale : vrais fichiers VGM déposés (souvent copyrightés) —
+# non versionnés. Seuls README et .gitkeep le sont.
+/library/*
+!/library/.gitkeep
+!/library/README.md

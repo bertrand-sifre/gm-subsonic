@@ -9,6 +9,7 @@
   ],
   "scripts": {
     "fixtures": "node tools/gen-fixtures.mjs",
+    "library:import": "node tools/import-library.mjs",
     "dev": "nx run-many -t serve --parallel=2",
     "build": "nx run-many -t build",
     "typecheck": "nx run-many -t typecheck",

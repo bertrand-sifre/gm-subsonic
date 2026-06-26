@@ -40,14 +40,28 @@ function slugify(value: string): string {
  * La durée réelle est lue dans l'en-tête du fichier audio ; les points de
  * boucle proviennent du manifeste (faute de tags fiables sur le WAV de test).
  */
+/** Lit un manifeste de morceaux ; renvoie [] s'il est absent ou illisible. */
+async function readManifest(path: string): Promise<MetaTrack[]> {
+  try {
+    const raw = await readFile(path, 'utf8');
+    return (JSON.parse(raw) as MetaFile).tracks ?? [];
+  } catch {
+    return [];
+  }
+}
+
 export async function scanLibrary(mediaDir: string): Promise<ScanResult> {
-  const metaRaw = await readFile(join(mediaDir, 'meta.json'), 'utf8');
-  const meta = JSON.parse(metaRaw) as MetaFile;
+  // Deux sources fusionnées : meta.json (fixtures synthétiques, versionné) et
+  // library.generated.json (sorties décodées par tools/import-library.mjs).
+  const entries = [
+    ...(await readManifest(join(mediaDir, 'meta.json'))),
+    ...(await readManifest(join(mediaDir, 'library.generated.json'))),
+  ];
 
   const tracks: Track[] = [];
   const files = new Map<string, string>();
 
-  for (const entry of meta.tracks) {
+  for (const entry of entries) {
     const filePath = join(mediaDir, entry.file);
     try {
       await stat(filePath);
