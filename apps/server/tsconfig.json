@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    // music-metadata@10 n'expose parseFile que via la condition d'export
+    // "node" ; sans cela, moduleResolution "Bundler" résout la branche
+    // "default" (sans parseFile) et le typecheck échoue (TS2305).
+    "customConditions": ["node"],
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts"]
+}

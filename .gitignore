@@ -1,0 +1,13 @@
+node_modules
+dist
+.nx
+*.log
+.DS_Store
+
+# Réglages Claude Code locaux (machine).
+.claude/settings.local.json
+
+# Fixtures audio générées (régénérables via `npm run fixtures`).
+# Seul media/meta.json (la source) est versionné.
+media/*.wav
+media/*.ogg

@@ -1,0 +1,29 @@
+{
+  "tracks": [
+    {
+      "file": "gerudo-valley.ogg",
+      "title": "Gerudo Valley",
+      "game": "The Legend of Zelda: Ocarina of Time",
+      "composer": "Koji Kondo",
+      "platform": "Nintendo 64",
+      "loopStart": 2,
+      "loopEnd": 6
+    },
+    {
+      "file": "prelude-no-loop.ogg",
+      "title": "Prélude (sans boucle)",
+      "game": "Récital de test",
+      "composer": "Traditionnel",
+      "platform": "Concert"
+    },
+    {
+      "file": "battle-theme.ogg",
+      "title": "Thème de combat",
+      "game": "Fantasy Battle (démo)",
+      "composer": "Studio VDM",
+      "platform": "Arcade",
+      "loopStart": 1,
+      "loopEnd": 5
+    }
+  ]
+}

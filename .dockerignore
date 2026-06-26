@@ -1,0 +1,16 @@
+# Le contexte de build reste minuscule (l'image n'embarque pas le code, monté
+# en bind-mount au runtime). On exclut surtout les artefacts lourds/spécifiques
+# à l'hôte pour ne jamais les envoyer au démon Docker.
+node_modules
+**/node_modules
+dist
+**/dist
+.nx
+.git
+.gitignore
+*.log
+.DS_Store
+
+# Fixtures générées (régénérées dans le conteneur via `npm run fixtures`).
+media/*.wav
+media/*.ogg
