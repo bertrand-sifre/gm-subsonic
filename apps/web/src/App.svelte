@@ -78,7 +78,11 @@
     if (!current) return;
     try {
       status = 'loading';
-      if (current.render) {
+      if (current.loop) {
+        // Boucle détectée : artefact de boucle (sans param) + lecture interactive.
+        await player.load(current);
+        await player.play({ mode, loopCount, fadeSeconds });
+      } else if (current.render) {
         // Rendu serveur : la durée + le fondu choisis sont passés en query.
         const url = `${current.streamUrl}?seconds=${Math.round(renderSeconds)}&fade=${renderFade}`;
         await player.load(current, url);
@@ -132,34 +136,17 @@
           {#each segments as s}
             <span class="chip"><b>{s.label}</b> {s.value}</span>
           {/each}
-          {#if current.render}
-            <span class="chip muted">pas de point de boucle (NSFe) — détection à venir</span>
+          {#if current.loop}
+            <span class="chip">🔁 boucle détectée</span>
+          {:else if current.render}
+            <span class="chip muted">lecture paramétrable (pas de boucle)</span>
           {/if}
         </div>
       {/if}
     </div>
 
-    {#if current?.render}
-      <!-- Format émulé : on choisit comment il se joue (durée + fondu). -->
-      <label>
-        Durée (s)
-        <input type="number" min="1" max="900" bind:value={renderSeconds} />
-      </label>
-      <label>
-        Fondu (s)
-        <input type="number" min="0" max="30" step="0.5" bind:value={renderFade} />
-      </label>
-      <div class="presets">
-        {#if defSeconds}
-          <button class="ghost" on:click={() => preset(defSeconds)}>
-            Version du jeu ({fmt(defSeconds)})
-          </button>
-        {/if}
-        <button class="ghost" on:click={() => preset(30)}>Court (30 s)</button>
-        <button class="ghost" on:click={() => preset(defSeconds * 3)}>Long (×3)</button>
-      </div>
-    {:else}
-      <!-- Piste à points de boucle : modes de lecture interactifs. -->
+    {#if current?.loop}
+      <!-- Piste à points de boucle (détectée) : modes de lecture interactifs. -->
       <label>
         Comportement
         <select bind:value={mode}>
@@ -180,6 +167,25 @@
           <input type="number" min="0.5" max="20" step="0.5" bind:value={fadeSeconds} />
         </label>
       {/if}
+    {:else if current?.render}
+      <!-- Format émulé sans boucle : durée + fondu (rendu serveur). -->
+      <label>
+        Durée (s)
+        <input type="number" min="1" max="900" bind:value={renderSeconds} />
+      </label>
+      <label>
+        Fondu (s)
+        <input type="number" min="0" max="30" step="0.5" bind:value={renderFade} />
+      </label>
+      <div class="presets">
+        {#if defSeconds}
+          <button class="ghost" on:click={() => preset(defSeconds)}>
+            Version du jeu ({fmt(defSeconds)})
+          </button>
+        {/if}
+        <button class="ghost" on:click={() => preset(30)}>Court (30 s)</button>
+        <button class="ghost" on:click={() => preset(defSeconds * 3)}>Long (×3)</button>
+      </div>
     {/if}
 
     <div class="transport">
@@ -208,8 +214,8 @@
                 <span class="meta">
                   {#if track.composer}{track.composer} · {/if}
                   {fmt(track.duration)}
-                  {#if track.loop}<span class="badge">boucle</span>{/if}
-                  {#if track.render}<span class="badge alt">rendu serveur</span>{/if}
+                  {#if track.loop}<span class="badge">boucle</span>
+                  {:else if track.render}<span class="badge alt">rendu serveur</span>{/if}
                 </span>
               </button>
             </li>

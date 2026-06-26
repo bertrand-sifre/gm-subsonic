@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
-import { scanLibrary, type RenderRef, type ScanResult } from './library.js';
+import { scanLibrary, type LoopRenderRef, type RenderRef, type ScanResult } from './library.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // apps/server/src -> racine du dépôt
@@ -49,6 +49,17 @@ app.get('/api/stream/:id', async (c) => {
 
   const staticPath = scan.files.get(id);
   if (staticPath) return serveFile(c, staticPath);
+
+  // Boucle détectée + aucun paramètre explicite -> artefact de boucle
+  // (lecture interactive côté client). Échec -> repli paramétrique ci-dessous.
+  const loopRef = scan.loops.get(id);
+  if (loopRef && c.req.query('seconds') == null && c.req.query('fade') == null) {
+    try {
+      return serveFile(c, await ensureLoopRendered(id, loopRef));
+    } catch (err) {
+      console.error(`[vdm] rendu boucle échoué (${id}), repli paramétrique :`, err);
+    }
+  }
 
   const ref = scan.renders.get(id);
   if (ref) {
@@ -118,7 +129,10 @@ function renderTrack(ref: RenderRef, seconds: number, fade: number, outPath: str
     args.push('-af', `afade=t=out:st=${Math.max(0, seconds - fade)}:d=${fade}`);
   }
   args.push('-c:a', 'libvorbis', '-qscale:a', '5', outPath);
+  return runFfmpeg(args);
+}
 
+function runFfmpeg(args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
     let stderr = '';
@@ -128,6 +142,39 @@ function renderTrack(ref: RenderRef, seconds: number, fade: number, outPath: str
       code === 0 ? resolve() : reject(new Error(`ffmpeg (code ${code}) : ${stderr.trim()}`))
     );
   });
+}
+
+// ---- Rendu de l'artefact de boucle [intro + 1 boucle + ε] ------------------
+
+const LOOP_EPSILON_SAMPLES = Math.round(0.05 * 44100); // marge pour un futur crossfade
+
+/** Garantit l'artefact de boucle en cache (clé stable, sans paramètre). */
+async function ensureLoopRendered(id: string, ref: LoopRenderRef): Promise<string> {
+  const outPath = join(CACHE_DIR, `${id}__loop.ogg`);
+  const existing = await stat(outPath).catch(() => null);
+  if (existing && existing.size > 0) return outPath;
+
+  let pending = inflight.get(outPath);
+  if (!pending) {
+    pending = renderLoop(ref, outPath).finally(() => inflight.delete(outPath));
+    inflight.set(outPath, pending);
+  }
+  await pending;
+  return outPath;
+}
+
+/** [intro + 1 boucle + ε] coupé au sample près, avec tags LOOPSTART/LOOPLENGTH. */
+function renderLoop(ref: LoopRenderRef, outPath: string): Promise<void> {
+  const endSample = ref.introSamples + ref.loopLengthSamples + LOOP_EPSILON_SAMPLES;
+  return runFfmpeg([
+    '-hide_banner', '-loglevel', 'error', '-y',
+    '-f', 'libgme', '-track_index', String(ref.trackIndex), '-sample_rate', '44100',
+    '-i', ref.sourcePath,
+    '-af', `atrim=end_sample=${endSample}`,
+    '-metadata', `LOOPSTART=${ref.introSamples}`,
+    '-metadata', `LOOPLENGTH=${ref.loopLengthSamples}`,
+    '-c:a', 'libvorbis', '-qscale:a', '5', outPath,
+  ]);
 }
 
 // ---- Service de fichier avec Range (RFC 7233) ------------------------------

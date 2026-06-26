@@ -4,36 +4,43 @@
  * Catalogue les vrais fichiers de musique de jeu déposés dans `library/`
  * (NSF, NSFe, SPC, VGM, GBS, trackers…) via ffprobe + libgme.
  *
- * On NE décode PLUS ici : ces formats sont émulés et infinis, et le rendu en
- * OGG se fait désormais À LA DEMANDE côté serveur, avec la durée + le fondu
- * choisis par l'utilisateur (`/api/stream/:id?seconds=&fade=`). L'import se
- * contente donc de lire les métadonnées par sous-piste :
- *   - nom de piste (tag `song`, présent dans les NSFe via le chunk tlbl) ;
- *   - durée voulue par le ripper (chunk `time` du NSFe) -> défaut de lecture ;
- *   - jeu / auteur / système (tags globaux).
+ * On NE décode PLUS l'audio ici : ces formats sont émulés et infinis, et le
+ * rendu en OGG se fait À LA DEMANDE côté serveur. L'import lit les métadonnées
+ * par sous-piste (nom via tag `song`, durée voulue via chunk `time`) et,
+ * optionnellement (flag VDM_DETECT), détecte les POINTS DE BOUCLE
+ * (tools/detect-loop.mjs) pour activer la lecture interactive côté client.
  *
- * Sortie : media/library.generated.json (manifeste lu par le serveur), avec
- * pour chaque entrée une référence à la SOURCE + l'index de sous-piste.
+ * Sortie : media/library.generated.json (manifeste lu par le serveur).
  *
  * Réglages (env) :
- *   VDM_FALLBACK_SECONDS (défaut 120)  durée par défaut si la source n'en donne pas
+ *   VDM_FALLBACK_SECONDS    (défaut 120)  durée par défaut si la source n'en donne pas
+ *   VDM_DETECT              (défaut off)  active la détection de boucle ('1'/'true')
+ *   VDM_DETECT_MIN_SECONDS  (défaut 20)   pistes plus courtes = jingles, non détectées
+ *   VDM_DETECT_ONLY         (défaut '')   ne détecte que les fichiers dont le nom contient cette sous-chaîne
  *
  * Usage :  node tools/import-library.mjs   (ou  npm run library:import)
  */
 
 import { spawn } from 'node:child_process';
-import { mkdir, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { detectLoop } from './detect-loop.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 const LIBRARY_DIR = join(ROOT, 'library');
 const MEDIA_DIR = join(ROOT, 'media');
 const MANIFEST = join(MEDIA_DIR, 'library.generated.json');
+const CACHE_FILE = join(MEDIA_DIR, 'loops.cache.json');
 
 const FALLBACK_SECONDS = Number(process.env.VDM_FALLBACK_SECONDS ?? 120);
 const CONCURRENCY = 6;
+
+const DETECT = process.env.VDM_DETECT === '1' || process.env.VDM_DETECT === 'true';
+const DETECT_MIN_SECONDS = Number(process.env.VDM_DETECT_MIN_SECONDS ?? 20);
+const DETECT_ONLY = process.env.VDM_DETECT_ONLY ?? '';
+const DETECT_CONCURRENCY = 2; // CPU/IO-bound : plus bas que les ffprobe
 
 /** Formats émulés/séquencés gérés par le demuxer libgme de ffmpeg. */
 const VGM_EXT = new Set([
@@ -100,7 +107,7 @@ async function probeTrack(file, index) {
   };
 }
 
-/** Petit pool de concurrence pour les ffprobe par piste. */
+/** Petit pool de concurrence. */
 async function pool(items, size, worker) {
   const out = new Array(items.length);
   let i = 0;
@@ -114,8 +121,68 @@ async function pool(items, size, worker) {
   return out;
 }
 
-async function catalogFile(fileName) {
+async function loadCache() {
+  try {
+    return JSON.parse(await readFile(CACHE_FILE, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Attache les boucles aux pistes. Le cache (par mtime/size) est TOUJOURS
+ * appliqué — les boucles déjà détectées survivent à un import sans VDM_DETECT
+ * (donc à un redémarrage). Le flag VDM_DETECT ne contrôle que la détection
+ * NEUVE (cache miss) ; sans lui, on se contente de réappliquer le cache.
+ */
+async function detectLoops(fileName, fileStat, entries, cache) {
+  const sourcePath = join(LIBRARY_DIR, fileName);
+  const keyFor = (e) => `${fileName}#${e.trackIndex}@${fileStat.mtimeMs}:${fileStat.size}`;
+
+  // 1) Réappliquer les boucles connues (persistance).
+  for (const e of entries) {
+    const cached = cache[keyFor(e)];
+    if (cached) e.loop = cached;
+  }
+
+  // 2) Détection neuve uniquement si activée et fichier non filtré.
+  if (!DETECT) return;
+  if (DETECT_ONLY && !fileName.includes(DETECT_ONLY)) return;
+  const todo = entries.filter(
+    (e) => e.defaultSeconds >= DETECT_MIN_SECONDS && cache[keyFor(e)] === undefined
+  );
+
+  await pool(todo, DETECT_CONCURRENCY, async (entry) => {
+    const key = keyFor(entry);
+    try {
+      const d = await detectLoop(sourcePath, entry.trackIndex, { defaultSeconds: entry.defaultSeconds });
+      const loop = d
+        ? {
+            startSeconds: d.loopStartSeconds,
+            lengthSeconds: d.loopLengthSeconds,
+            startSamples: d.introSamples,
+            lengthSamples: d.loopLengthSamples,
+            sampleRate: d.sampleRate,
+            confidence: d.confidence,
+          }
+        : null;
+      cache[key] = loop;
+      if (loop) {
+        entry.loop = loop;
+        process.stdout.write(
+          `  ⟳ boucle ${entry.id} : ${loop.lengthSeconds}s (intro ${loop.startSeconds}s, conf ${loop.confidence})\n`
+        );
+      }
+    } catch (err) {
+      process.stdout.write(`  ! détection KO ${entry.id} : ${err.message}\n`);
+      cache[key] = null;
+    }
+  });
+}
+
+async function catalogFile(fileName, cache) {
   const filePath = join(LIBRARY_DIR, fileName);
+  const fileStat = await stat(filePath);
   const meta = await probeGlobal(filePath);
   const game = meta.game ?? fileName.replace(/\.[^.]+$/, '');
   const base = slugify(fileName); // inclut l'extension -> id unique .nsf vs .nsfe
@@ -126,12 +193,10 @@ async function catalogFile(fileName) {
   );
 
   const indices = Array.from({ length: meta.trackCount }, (_, i) => i);
-  return pool(indices, CONCURRENCY, async (index) => {
+  const entries = await pool(indices, CONCURRENCY, async (index) => {
     const nn = String(index + 1).padStart(2, '0');
     const { seconds, name } = await probeTrack(filePath, index);
     const defaultSeconds = Math.round(seconds);
-    // Fondu par défaut seulement pour les pistes longues (les jingles courts
-    // finissent d'eux-mêmes). L'utilisateur peut le changer dans l'UI.
     const defaultFade = defaultSeconds >= 20 ? 4 : 0;
     return {
       id: `${base}-${nn}`,
@@ -145,6 +210,9 @@ async function catalogFile(fileName) {
       defaultFade,
     };
   });
+
+  await detectLoops(fileName, fileStat, entries, cache);
+  return entries;
 }
 
 async function main() {
@@ -163,17 +231,22 @@ async function main() {
     return;
   }
 
+  if (DETECT) console.log('[catalogue] détection de boucle ACTIVE (VDM_DETECT)');
+  const cache = await loadCache();
+
   const allTracks = [];
   for (const fileName of files) {
     try {
-      allTracks.push(...(await catalogFile(fileName)));
+      allTracks.push(...(await catalogFile(fileName, cache)));
     } catch (err) {
       console.error(`[catalogue] ${fileName} ignoré : ${err.message}`);
     }
   }
 
   await writeFile(MANIFEST, JSON.stringify({ tracks: allTracks }, null, 2));
-  console.log(`[catalogue] terminé : ${allTracks.length} morceau(x) → ${MANIFEST}`);
+  if (DETECT) await writeFile(CACHE_FILE, JSON.stringify(cache, null, 1));
+  const looped = allTracks.filter((t) => t.loop).length;
+  console.log(`[catalogue] terminé : ${allTracks.length} morceau(x), ${looped} avec boucle détectée → ${MANIFEST}`);
 }
 
 main().catch((err) => {

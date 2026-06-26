@@ -25,6 +25,14 @@ interface MetaTrack {
   trackIndex?: number;
   defaultSeconds?: number;
   defaultFade?: number;
+  /** Boucle détectée (tools/detect-loop.mjs) pour une piste émulée. */
+  loop?: {
+    startSeconds: number;
+    lengthSeconds: number;
+    startSamples: number;
+    lengthSamples: number;
+    sampleRate: number;
+  };
 }
 
 interface MetaFile {
@@ -39,12 +47,22 @@ export interface RenderRef {
   defaultFade: number;
 }
 
+/** Référence permettant de rendre l'artefact de boucle [intro + 1 boucle + ε]. */
+export interface LoopRenderRef {
+  sourcePath: string;
+  trackIndex: number;
+  introSamples: number;
+  loopLengthSamples: number;
+}
+
 export interface ScanResult {
   library: Library;
   /** id -> chemin absolu, pour les morceaux à servir statiquement. */
   files: Map<string, string>;
-  /** id -> référence de rendu, pour les morceaux émulés. */
+  /** id -> référence de rendu paramétrique (durée/fondu), pour les morceaux émulés. */
   renders: Map<string, RenderRef>;
+  /** id -> référence de rendu de boucle, pour les pistes émulées bouclées. */
+  loops: Map<string, LoopRenderRef>;
 }
 
 function slugify(value: string): string {
@@ -79,11 +97,12 @@ export async function scanLibrary(mediaDir: string, libraryDir: string): Promise
   const tracks: Track[] = [];
   const files = new Map<string, string>();
   const renders = new Map<string, RenderRef>();
+  const loops = new Map<string, LoopRenderRef>();
 
   for (const entry of entries) {
     const isEmulated = entry.source != null && entry.trackIndex != null;
     const track = isEmulated
-      ? await buildEmulated(entry, libraryDir, renders)
+      ? await buildEmulated(entry, libraryDir, renders, loops)
       : await buildStatic(entry, mediaDir, files);
     if (track) tracks.push(track);
   }
@@ -97,14 +116,15 @@ export async function scanLibrary(mediaDir: string, libraryDir: string): Promise
   }
   const games: GameGroup[] = [...byGame.entries()].map(([game, list]) => ({ game, tracks: list }));
 
-  return { library: { games }, files, renders };
+  return { library: { games }, files, renders, loops };
 }
 
 /** Morceau émulé : rendu à la demande, durée/fondu par défaut depuis la source. */
 async function buildEmulated(
   entry: MetaTrack,
   libraryDir: string,
-  renders: Map<string, RenderRef>
+  renders: Map<string, RenderRef>,
+  loops: Map<string, LoopRenderRef>
 ): Promise<Track | null> {
   const sourcePath = join(libraryDir, entry.source!);
   try {
@@ -118,9 +138,10 @@ async function buildEmulated(
   const defaultSeconds = entry.defaultSeconds ?? 120;
   const defaultFade = entry.defaultFade ?? 0;
 
+  // Repli paramétrique : toujours disponible (filet de sécurité).
   renders.set(id, { sourcePath, trackIndex: entry.trackIndex!, defaultSeconds, defaultFade });
 
-  return {
+  const track: Track = {
     id,
     title: entry.title,
     game: entry.game,
@@ -130,6 +151,24 @@ async function buildEmulated(
     render: { defaultSeconds, defaultFade },
     streamUrl: `/api/stream/${id}`,
   };
+
+  // Boucle détectée : lecture interactive (prime sur le paramétrique).
+  if (entry.loop) {
+    const loopStart = entry.loop.startSeconds;
+    const loopEnd = entry.loop.startSeconds + entry.loop.lengthSeconds;
+    track.loop = { loopStart, loopEnd };
+    // L'artefact rendu dure intro + 1 boucle : recaler la durée pour que le
+    // client ne calcule pas de fausse queue.
+    track.duration = loopEnd;
+    loops.set(id, {
+      sourcePath,
+      trackIndex: entry.trackIndex!,
+      introSamples: entry.loop.startSamples,
+      loopLengthSamples: entry.loop.lengthSamples,
+    });
+  }
+
+  return track;
 }
 
 /** Morceau statique : fichier audio servi tel quel (durée + boucle lues du fichier). */
@@ -147,18 +186,23 @@ async function buildStatic(
   }
 
   let duration = 0;
+  let embeddedLoop: { loopStart: number; loopEnd: number } | undefined;
   try {
     const parsed = await parseFile(filePath, { duration: true });
     duration = parsed.format.duration ?? 0;
+    embeddedLoop = readEmbeddedLoop(parsed);
   } catch (err) {
     console.warn(`[library] métadonnées illisibles pour ${entry.file}:`, err);
   }
 
   const id = slugify(entry.file!);
-  const hasLoop =
+  // Le manifeste (meta.json) prime sur les tags du fichier.
+  const manifestLoop =
     typeof entry.loopStart === 'number' &&
     typeof entry.loopEnd === 'number' &&
-    entry.loopEnd > entry.loopStart;
+    entry.loopEnd > entry.loopStart
+      ? { loopStart: entry.loopStart, loopEnd: entry.loopEnd }
+      : undefined;
 
   files.set(id, filePath);
   return {
@@ -168,7 +212,44 @@ async function buildStatic(
     composer: entry.composer,
     platform: entry.platform,
     duration,
-    loop: hasLoop ? { loopStart: entry.loopStart!, loopEnd: entry.loopEnd! } : undefined,
+    loop: manifestLoop ?? embeddedLoop,
     streamUrl: `/api/stream/${id}`,
   };
+}
+
+/**
+ * Lit les commentaires Vorbis LOOPSTART/LOOPLENGTH (ou LOOPEND) d'un fichier
+ * (convention répandue des OST rippées) et les convertit en secondes.
+ * Les valeurs sont en FRAMES (par canal) → on divise par le sampleRate.
+ */
+function readEmbeddedLoop(
+  parsed: Awaited<ReturnType<typeof parseFile>>
+): { loopStart: number; loopEnd: number } | undefined {
+  const sr = parsed.format.sampleRate;
+  if (!sr) return undefined;
+
+  let startFrames: number | undefined;
+  let lengthFrames: number | undefined;
+  let endFrames: number | undefined;
+  for (const group of Object.values(parsed.native ?? {})) {
+    for (const tag of group) {
+      const tid = tag.id.toUpperCase();
+      const v = Number(tag.value);
+      if (!Number.isFinite(v)) continue;
+      if (tid === 'LOOPSTART') startFrames = v;
+      else if (tid === 'LOOPLENGTH') lengthFrames = v;
+      else if (tid === 'LOOPEND') endFrames = v;
+    }
+  }
+  if (startFrames == null) return undefined;
+
+  const loopStart = startFrames / sr;
+  const loopEnd =
+    endFrames != null
+      ? endFrames / sr
+      : lengthFrames != null
+        ? (startFrames + lengthFrames) / sr
+        : NaN;
+  if (!Number.isFinite(loopEnd) || loopEnd <= loopStart) return undefined;
+  return { loopStart, loopEnd };
 }

@@ -17,6 +17,10 @@ media/*.ogg
 media/_decoded/
 media/_cache/
 media/library.generated.json
+media/loops.cache.json
+
+# Script de spike (prototype de détection de boucle, non versionné).
+/_spike_loop.cjs
 
 # Bibliothèque locale : vrais fichiers VGM déposés (souvent copyrightés) —
 # non versionnés. Seuls README et .gitkeep le sont.
