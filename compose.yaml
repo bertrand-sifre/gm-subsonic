@@ -11,9 +11,12 @@ services:
       context: .
       dockerfile: Dockerfile
     image: vdm-subsonic-dev
-    # Installe les deps si le volume node_modules est vide (1er run), puis lance
-    # le dev. `exec` pour que les signaux (Ctrl+C) atteignent npm/nx.
-    command: ["sh", "-c", "[ -d node_modules/.bin ] || npm install; exec npm run dev"]
+    # 1) installe les deps si le volume node_modules est vide (1er run) ;
+    # 2) importe la bibliothèque (décode les nouveaux fichiers de library/,
+    #    incrémental donc rapide) ; 3) lance le dev. `exec` pour que les signaux
+    #    (Ctrl+C) atteignent npm/nx. Le `;` (et non `&&`) garantit que le dev
+    #    démarre même si l'import échoue.
+    command: ["sh", "-c", "[ -d node_modules/.bin ] || npm install; npm run library:import; exec npm run dev"]
     working_dir: /app
     ports:
       - "5173:5173" # Vite (front Svelte)

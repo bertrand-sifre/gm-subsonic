@@ -140,8 +140,16 @@ async function importFile(file, fileName) {
     const outName = `${base}-${nn}.ogg`;
     const outPath = join(OUT_DIR, outName);
     try {
-      const size = await decodeTrack(file, index, outPath);
-      process.stdout.write(`  ✓ ${outName} (${(size / 1024).toFixed(0)} Ko)\n`);
+      // Incrémental : on ne re-décode pas un OGG déjà présent (non vide).
+      const existing = await stat(outPath).catch(() => null);
+      let size;
+      if (existing && existing.size > 0) {
+        size = existing.size;
+        process.stdout.write(`  ↻ ${outName} (déjà décodé)\n`);
+      } else {
+        size = await decodeTrack(file, index, outPath);
+        process.stdout.write(`  ✓ ${outName} (${(size / 1024).toFixed(0)} Ko)\n`);
+      }
       return {
         file: `_decoded/${outName}`,
         title: `Piste ${nn}`,
@@ -175,8 +183,12 @@ async function main() {
 
   const allTracks = [];
   for (const fileName of files) {
-    const tracks = await importFile(join(LIBRARY_DIR, fileName), fileName);
-    allTracks.push(...tracks);
+    try {
+      const tracks = await importFile(join(LIBRARY_DIR, fileName), fileName);
+      allTracks.push(...tracks);
+    } catch (err) {
+      console.error(`[import] ${fileName} ignoré : ${err.message}`);
+    }
   }
 
   await writeFile(MANIFEST, JSON.stringify({ tracks: allTracks }, null, 2));
