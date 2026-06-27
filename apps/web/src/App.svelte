@@ -18,6 +18,9 @@
   let renderSeconds = 120;
   let renderFade = 4;
 
+  // Activation des voix (stems) de la piste courante : id de canal -> booléen.
+  let channelOn: Record<string, boolean> = {};
+
   // Durée par défaut de la piste émulée courante (0 si non émulée).
   $: defSeconds = current?.render?.defaultSeconds ?? 0;
 
@@ -71,6 +74,10 @@
       renderSeconds = track.render.defaultSeconds;
       renderFade = track.render.defaultFade;
     }
+    if (track.channels) {
+      channelOn = {};
+      for (const v of track.channels.voices) channelOn[v.id] = v.enabledByDefault !== false;
+    }
     await playCurrent();
   }
 
@@ -78,7 +85,14 @@
     if (!current) return;
     try {
       status = 'loading';
-      if (current.loop) {
+      if (current.channels) {
+        // Stems : une voix par canal, jouées en synchro + toggle en direct.
+        await player.loadChannels(
+          current,
+          current.channels.voices.map((v) => ({ id: v.id, url: v.streamUrl, enabledByDefault: channelOn[v.id] }))
+        );
+        await player.play({ mode, loopCount, fadeSeconds });
+      } else if (current.loop) {
         // Boucle détectée : artefact de boucle (sans param) + lecture interactive.
         await player.load(current);
         await player.play({ mode, loopCount, fadeSeconds });
@@ -101,6 +115,11 @@
   function preset(seconds: number) {
     renderSeconds = seconds;
     void playCurrent();
+  }
+
+  function toggleChannel(id: string) {
+    channelOn = { ...channelOn, [id]: !channelOn[id] };
+    player.setChannelEnabled(id, channelOn[id]); // en direct, sans relancer
   }
 
   function stop() {
@@ -136,6 +155,9 @@
           {#each segments as s}
             <span class="chip"><b>{s.label}</b> {s.value}</span>
           {/each}
+          {#if current.channels}
+            <span class="chip">🎚 {current.channels.voices.length} voix (stems)</span>
+          {/if}
           {#if current.loop}
             <span class="chip">🔁 boucle détectée</span>
           {:else if current.render}
@@ -144,6 +166,18 @@
         </div>
       {/if}
     </div>
+
+    {#if current?.channels}
+      <div class="channels">
+        <span class="chan-label">Voix</span>
+        {#each current.channels.voices as v}
+          <label class="chan">
+            <input type="checkbox" checked={channelOn[v.id]} on:change={() => toggleChannel(v.id)} />
+            {v.label}
+          </label>
+        {/each}
+      </div>
+    {/if}
 
     {#if current?.loop}
       <!-- Piste à points de boucle (détectée) : modes de lecture interactifs. -->
@@ -214,7 +248,8 @@
                 <span class="meta">
                   {#if track.composer}{track.composer} · {/if}
                   {fmt(track.duration)}
-                  {#if track.loop}<span class="badge">boucle</span>
+                  {#if track.channels}<span class="badge stems">stems</span>
+                  {:else if track.loop}<span class="badge">boucle</span>
                   {:else if track.render}<span class="badge alt">rendu serveur</span>{/if}
                 </span>
               </button>
@@ -402,5 +437,30 @@
   .badge.alt {
     background: #3a3553;
     color: #cfcae8;
+  }
+  .badge.stems {
+    background: #1f7a5a;
+    color: #d6fff0;
+  }
+  .channels {
+    flex: 1 1 100%;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 0.9rem;
+  }
+  .chan-label {
+    font-size: 0.85rem;
+    color: #9b96b8;
+  }
+  .chan {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.85rem;
+    color: #e8e6f0;
+  }
+  .chan input {
+    width: auto;
   }
 </style>

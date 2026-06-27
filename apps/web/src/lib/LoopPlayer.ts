@@ -1,29 +1,46 @@
 import type { PlaybackOptions, Track } from '@vdm/shared';
 
 /**
- * Lecteur Web Audio gérant les particularités des musiques de jeu vidéo :
- * intro, boucle répétée, queue (fin personnalisée) et fondu de sortie.
- *
- * Pourquoi la Web Audio API et pas une balise <audio> :
- *  - <audio> ne sait pas boucler à l'échantillon près ni au bon endroit ;
- *  - on a besoin d'un timing exact pour enchaîner boucle -> queue sans trou ;
- *  - cela prépare le terrain pour le mixage de stems (tranches 4-5).
+ * Lecteur Web Audio des musiques de jeu : intro, boucle répétée, queue, fondu,
+ * et MIXAGE DE STEMS (une voix = un canal APU).
  *
  * Modèle d'un morceau :
  *   [==== intro ====|==== boucle ====|== queue ==]
  *   0           loopStart        loopEnd        durée
  *
- * La FIN de lecture est pilotée par l'événement `onended` du nœud terminal
- * (horloge audio), jamais par setTimeout : un timer mural se déclencherait trop
- * tôt après une pause (suspend() fige l'horloge audio mais pas l'horloge murale).
+ * Multi-voix : chaque voix a sa propre source -> son gain de canal -> un gain
+ * master -> destination. Toutes les sources démarrent au MÊME t0 avec les MÊMES
+ * loopStart/loopEnd (stems de longueur identique par construction) -> verrouillées
+ * en phase. Activer/désactiver une voix = rampe sur son gain SANS arrêter la
+ * source (pas de resynchro). Le cas mono (un fichier mixé) = une seule voix.
+ *
+ * La FIN est pilotée par `onended` d'UN nœud « timekeeper » (horloge audio),
+ * jamais par setTimeout (un timer mural se déclencherait trop tôt après pause).
  */
+
+interface Voice {
+  buffer: AudioBuffer;
+  enabled: boolean;
+}
+
+interface Plan {
+  noLoop: boolean;
+  mode: PlaybackOptions['mode'];
+  loop: { loopStart: number; loopEnd: number } | undefined;
+  t0: number;
+  endOfLoops: number;
+}
+
 export class LoopPlayer {
   private ctx: AudioContext | null = null;
-  private buffer: AudioBuffer | null = null;
   private track: Track | null = null;
 
+  /** Voix chargées (id -> buffer + état d'activation). */
+  private voices = new Map<string, Voice>();
+  /** Gains de canal créés au play (id -> GainNode), pour le toggle en direct. */
+  private channelGains = new Map<string, GainNode>();
+  private master: GainNode | null = null;
   private sources: AudioBufferSourceNode[] = [];
-  private gain: GainNode | null = null;
 
   /** Callback appelé quand la lecture se termine d'elle-même (pas sur stop()). */
   onEnded: (() => void) | null = null;
@@ -33,96 +50,136 @@ export class LoopPlayer {
     return this.ctx;
   }
 
+  private async fetchBuffer(url: string): Promise<AudioBuffer> {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`stream ${url}: HTTP ${res.status}`);
+    return this.ensureContext().decodeAudioData(await res.arrayBuffer());
+  }
+
   /**
-   * Télécharge et décode le fichier audio du morceau. `streamUrl` permet de
-   * surcharger l'URL (ex. paramètres de rendu serveur `?seconds=&fade=`).
+   * Charge un morceau mono (fichier mixé). `streamUrl` surcharge l'URL (ex.
+   * paramètres de rendu serveur `?seconds=&fade=`).
    */
   async load(track: Track, streamUrl: string = track.streamUrl): Promise<void> {
-    const ctx = this.ensureContext();
-    const res = await fetch(streamUrl);
-    if (!res.ok) throw new Error(`stream ${track.id}: HTTP ${res.status}`);
-    const data = await res.arrayBuffer();
-    this.buffer = await ctx.decodeAudioData(data);
+    const buffer = await this.fetchBuffer(streamUrl);
+    this.setTrack(track, [{ id: '__main__', buffer, enabled: true }]);
+  }
+
+  /** Charge un morceau en STEMS : une voix par canal, jouées en synchro. */
+  async loadChannels(
+    track: Track,
+    voices: { id: string; url: string; enabledByDefault?: boolean }[]
+  ): Promise<void> {
+    const decoded = await Promise.all(
+      voices.map(async (v) => ({
+        id: v.id,
+        buffer: await this.fetchBuffer(v.url),
+        enabled: v.enabledByDefault !== false,
+      }))
+    );
+    this.setTrack(track, decoded);
+  }
+
+  private setTrack(track: Track, list: { id: string; buffer: AudioBuffer; enabled: boolean }[]): void {
+    this.stop();
     this.track = track;
+    this.voices.clear();
+    for (const v of list) this.voices.set(v.id, { buffer: v.buffer, enabled: v.enabled });
   }
 
   /** Démarre la lecture selon le comportement choisi. */
   async play(options: PlaybackOptions): Promise<void> {
-    if (!this.buffer || !this.track) throw new Error('aucun morceau chargé');
+    if (!this.track || this.voices.size === 0) throw new Error('aucun morceau chargé');
     const ctx = this.ensureContext();
-    // stop() AVANT l'await : évite tout entrelacement si play() est rappelé
-    // pendant la reprise du contexte (états transitoires / churn de nœuds).
+    // stop() AVANT l'await : évite tout entrelacement si play() est rappelé.
     this.stop();
     if (ctx.state === 'suspended') await ctx.resume();
 
-    const gain = ctx.createGain();
-    gain.connect(ctx.destination);
-    this.gain = gain;
+    const master = ctx.createGain();
+    master.connect(ctx.destination);
+    this.master = master;
 
     const loop = this.track.loop;
-    const t0 = ctx.currentTime + 0.05; // petite marge avant le démarrage
+    const t0 = ctx.currentTime + 0.05;
+    const noLoop = !loop || options.mode === 'once';
+    const introDur = loop ? loop.loopStart : 0;
+    const loopDur = loop ? loop.loopEnd - loop.loopStart : 0;
+    const repeats = Math.max(1, Math.floor(Number.isFinite(options.loopCount) ? options.loopCount : 1));
+    const endOfLoops = t0 + introDur + repeats * loopDur;
 
-    // Pas de boucle, ou lecture normale demandée : on joue le fichier entier.
-    if (!loop || options.mode === 'once') {
-      const src = this.newSource(gain);
-      src.start(t0);
-      this.armEnd(src);
-      return;
+    // Fondu de sortie : sur le MASTER (partagé par toutes les voix), une seule fois.
+    if (!noLoop && options.mode === 'loopCountFade') {
+      const fade = Math.max(0.01, Number.isFinite(options.fadeSeconds) ? options.fadeSeconds : 0.01);
+      const effectiveFade = Math.min(fade, endOfLoops - t0);
+      const fadeStart = endOfLoops - effectiveFade;
+      master.gain.setValueAtTime(1, fadeStart);
+      master.gain.exponentialRampToValueAtTime(0.0001, endOfLoops);
     }
 
-    const introDur = loop.loopStart;
-    const loopDur = loop.loopEnd - loop.loopStart;
+    const plan: Plan = { noLoop, mode: options.mode, loop, t0, endOfLoops };
 
-    if (options.mode === 'loopInfinite') {
-      const src = this.newSource(gain);
+    // Une source (ou deux) par voix, via son gain de canal -> master.
+    let timekeeper: AudioBufferSourceNode | null = null;
+    for (const [id, voice] of this.voices) {
+      const chGain = ctx.createGain();
+      chGain.gain.value = voice.enabled ? 1 : 0;
+      chGain.connect(master);
+      this.channelGains.set(id, chGain);
+
+      const terminal = this.scheduleVoice(voice.buffer, chGain, plan);
+      if (terminal && !timekeeper) timekeeper = terminal;
+    }
+
+    // Fin pilotée par UN seul nœud (sinon onEnded tirerait N fois).
+    if (timekeeper) this.armEnd(timekeeper);
+  }
+
+  /** Programme la (ou les) source(s) d'une voix selon le plan ; renvoie le nœud terminal. */
+  private scheduleVoice(buffer: AudioBuffer, out: GainNode, p: Plan): AudioBufferSourceNode | null {
+    if (p.noLoop) {
+      const src = this.newSource(buffer, out);
+      src.start(p.t0);
+      return src;
+    }
+    const loop = p.loop!;
+
+    if (p.mode === 'loopInfinite') {
+      const src = this.newSource(buffer, out);
       src.loop = true;
       src.loopStart = loop.loopStart;
       src.loopEnd = loop.loopEnd;
-      src.start(t0);
-      return; // jamais de fin automatique
+      src.start(p.t0);
+      return null; // jamais de fin automatique
     }
 
-    // Modes loopCount / loopCountFade : intro + N boucles, puis queue ou fondu.
-    const repeats = Math.max(
-      1,
-      Math.floor(Number.isFinite(options.loopCount) ? options.loopCount : 1)
-    );
-    const loopPart = this.newSource(gain);
+    // loopCount / loopCountFade : intro + N boucles.
+    const loopPart = this.newSource(buffer, out);
     loopPart.loop = true;
     loopPart.loopStart = loop.loopStart;
     loopPart.loopEnd = loop.loopEnd;
-    loopPart.start(t0);
+    loopPart.start(p.t0);
+    loopPart.stop(p.endOfLoops);
+    if (p.mode === 'loopCountFade') return loopPart;
 
-    // Instant exact du repeats-ième retour au point de boucle (tête à loopEnd).
-    const endOfLoops = t0 + introDur + repeats * loopDur;
-
-    if (options.mode === 'loopCountFade') {
-      const fade = Math.max(
-        0.01,
-        Number.isFinite(options.fadeSeconds) ? options.fadeSeconds : 0.01
-      );
-      // On garde exactement `repeats` boucles : si le fondu est plus long que
-      // toute la lecture, on le raccourcit pour qu'il s'achève à endOfLoops.
-      const effectiveFade = Math.min(fade, endOfLoops - t0);
-      const fadeStart = endOfLoops - effectiveFade;
-      gain.gain.setValueAtTime(1, fadeStart);
-      // Rampe quasi-exponentielle (perçue plus naturelle qu'un fondu linéaire) ;
-      // exponentialRamp ne peut pas viser 0, on cible un epsilon inaudible.
-      gain.gain.exponentialRampToValueAtTime(0.0001, endOfLoops);
-      loopPart.stop(endOfLoops);
-      this.armEnd(loopPart);
-      return;
-    }
-
-    // loopCount : on coupe la boucle et on enchaîne la queue [loopEnd, durée].
-    loopPart.stop(endOfLoops);
-    const hasTail = this.buffer.duration - loop.loopEnd > 0.02;
+    // loopCount : enchaîner la queue [loopEnd, durée].
+    const hasTail = buffer.duration - loop.loopEnd > 0.02;
     if (hasTail) {
-      const tail = this.newSource(gain);
-      tail.start(endOfLoops, loop.loopEnd);
-      this.armEnd(tail);
-    } else {
-      this.armEnd(loopPart);
+      const tail = this.newSource(buffer, out);
+      tail.start(p.endOfLoops, loop.loopEnd);
+      return tail;
+    }
+    return loopPart;
+  }
+
+  /** Active/désactive une voix EN DIRECT (rampe anti-clic, sans resynchro). */
+  setChannelEnabled(id: string, on: boolean): void {
+    const voice = this.voices.get(id);
+    if (voice) voice.enabled = on;
+    const g = this.channelGains.get(id);
+    if (g && this.ctx) {
+      const now = this.ctx.currentTime;
+      g.gain.cancelScheduledValues(now);
+      g.gain.setTargetAtTime(on ? 1 : 0, now, 0.01); // ~10 ms
     }
   }
 
@@ -137,9 +194,11 @@ export class LoopPlayer {
       src.disconnect();
     }
     this.sources = [];
-    if (this.gain) {
-      this.gain.disconnect();
-      this.gain = null;
+    for (const g of this.channelGains.values()) g.disconnect();
+    this.channelGains.clear();
+    if (this.master) {
+      this.master.disconnect();
+      this.master = null;
     }
   }
 
@@ -160,19 +219,14 @@ export class LoopPlayer {
     }
   }
 
-  private newSource(out: GainNode): AudioBufferSourceNode {
-    const ctx = this.ensureContext();
-    const src = ctx.createBufferSource();
-    src.buffer = this.buffer;
+  private newSource(buffer: AudioBuffer, out: GainNode): AudioBufferSourceNode {
+    const src = this.ensureContext().createBufferSource();
+    src.buffer = buffer;
     src.connect(out);
     this.sources.push(src);
     return src;
   }
 
-  /**
-   * Arme la fin de lecture sur le nœud terminal via l'horloge audio. Quand ce
-   * nœud s'arrête (fin naturelle ou stop() programmé), on nettoie et on notifie.
-   */
   private armEnd(node: AudioBufferSourceNode): void {
     node.onended = () => {
       this.stop();
