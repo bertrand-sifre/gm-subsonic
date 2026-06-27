@@ -26,6 +26,7 @@ import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { detectLoop } from './detect-loop.mjs';
+import { extractStems } from './nsf-stems.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -33,6 +34,7 @@ const LIBRARY_DIR = join(ROOT, 'library');
 const MEDIA_DIR = join(ROOT, 'media');
 const MANIFEST = join(MEDIA_DIR, 'library.generated.json');
 const CACHE_FILE = join(MEDIA_DIR, 'loops.cache.json');
+const STEMS_CACHE_FILE = join(MEDIA_DIR, 'stems.cache.json');
 
 const FALLBACK_SECONDS = Number(process.env.VDM_FALLBACK_SECONDS ?? 120);
 const CONCURRENCY = 6;
@@ -41,6 +43,12 @@ const DETECT = process.env.VDM_DETECT === '1' || process.env.VDM_DETECT === 'tru
 const DETECT_MIN_SECONDS = Number(process.env.VDM_DETECT_MIN_SECONDS ?? 20);
 const DETECT_ONLY = process.env.VDM_DETECT_ONLY ?? '';
 const DETECT_CONCURRENCY = 2; // CPU/IO-bound : plus bas que les ffprobe
+
+const STEMS = process.env.VDM_STEMS === '1' || process.env.VDM_STEMS === 'true';
+const STEMS_ONLY = process.env.VDM_STEMS_ONLY ?? '';
+const STEMS_MIN_SECONDS = Number(process.env.VDM_STEMS_MIN_SECONDS ?? 20);
+const STEMS_CONCURRENCY = 1; // très lourd (N canaux × longueur) -> séquentiel
+const NSFPLAY = process.env.VDM_NSFPLAY ?? 'nsftool';
 
 /** Formats émulés/séquencés gérés par le demuxer libgme de ffmpeg. */
 const VGM_EXT = new Set([
@@ -121,9 +129,9 @@ async function pool(items, size, worker) {
   return out;
 }
 
-async function loadCache() {
+async function loadJson(path) {
   try {
-    return JSON.parse(await readFile(CACHE_FILE, 'utf8'));
+    return JSON.parse(await readFile(path, 'utf8'));
   } catch {
     return {};
   }
@@ -180,7 +188,53 @@ async function detectLoops(fileName, fileStat, entries, cache) {
   });
 }
 
-async function catalogFile(fileName, cache) {
+/**
+ * Attache les stems par voix (via nsftool). Cache TOUJOURS appliqué
+ * (persistance) ; VDM_STEMS ne contrôle que l'extraction neuve. NSF/NSFe only.
+ */
+async function extractAllStems(fileName, fileStat, entries, cache) {
+  const keyFor = (e) => `${fileName}#${e.trackIndex}@${fileStat.mtimeMs}:${fileStat.size}`;
+
+  // 1) Réappliquer le cache connu (persistance).
+  for (const e of entries) {
+    const cached = cache[keyFor(e)];
+    if (cached) {
+      e.channels = { sampleRate: cached.sampleRate, voices: cached.voices };
+      if (cached.loop) e.loop = cached.loop; // boucle moteur prime
+    }
+  }
+
+  // 2) Extraction neuve uniquement si activée, NSF/NSFe, fichier non filtré.
+  if (!STEMS) return;
+  if (!/\.nsfe?$/i.test(fileName)) return;
+  if (STEMS_ONLY && !fileName.includes(STEMS_ONLY)) return;
+  const sourcePath = join(LIBRARY_DIR, fileName);
+  const todo = entries.filter(
+    (e) => e.defaultSeconds >= STEMS_MIN_SECONDS && cache[keyFor(e)] === undefined
+  );
+
+  await pool(todo, STEMS_CONCURRENCY, async (entry) => {
+    const key = keyFor(entry);
+    try {
+      const res = await extractStems({
+        sourcePath, trackIndex: entry.trackIndex, id: entry.id,
+        audioLoop: entry.loop, mediaDir: MEDIA_DIR, nsftool: NSFPLAY,
+      });
+      cache[key] = res ?? null;
+      if (res) {
+        entry.channels = { sampleRate: res.sampleRate, voices: res.voices };
+        if (res.loop) entry.loop = res.loop; // boucle moteur prime sur l'audio
+        const active = res.voices.filter((v) => v.enabledByDefault).length;
+        process.stdout.write(`  ♪ stems ${entry.id} : ${res.voices.length} voix (${active} actives)\n`);
+      }
+    } catch (err) {
+      process.stdout.write(`  ! stems KO ${entry.id} : ${err.message}\n`);
+      cache[key] = null;
+    }
+  });
+}
+
+async function catalogFile(fileName, caches) {
   const filePath = join(LIBRARY_DIR, fileName);
   const fileStat = await stat(filePath);
   const meta = await probeGlobal(filePath);
@@ -211,7 +265,8 @@ async function catalogFile(fileName, cache) {
     };
   });
 
-  await detectLoops(fileName, fileStat, entries, cache);
+  await detectLoops(fileName, fileStat, entries, caches.loops);
+  await extractAllStems(fileName, fileStat, entries, caches.stems);
   return entries;
 }
 
@@ -232,21 +287,24 @@ async function main() {
   }
 
   if (DETECT) console.log('[catalogue] détection de boucle ACTIVE (VDM_DETECT)');
-  const cache = await loadCache();
+  if (STEMS) console.log('[catalogue] extraction de stems ACTIVE (VDM_STEMS)');
+  const caches = { loops: await loadJson(CACHE_FILE), stems: await loadJson(STEMS_CACHE_FILE) };
 
   const allTracks = [];
   for (const fileName of files) {
     try {
-      allTracks.push(...(await catalogFile(fileName, cache)));
+      allTracks.push(...(await catalogFile(fileName, caches)));
     } catch (err) {
       console.error(`[catalogue] ${fileName} ignoré : ${err.message}`);
     }
   }
 
   await writeFile(MANIFEST, JSON.stringify({ tracks: allTracks }, null, 2));
-  if (DETECT) await writeFile(CACHE_FILE, JSON.stringify(cache, null, 1));
+  if (DETECT) await writeFile(CACHE_FILE, JSON.stringify(caches.loops, null, 1));
+  if (STEMS) await writeFile(STEMS_CACHE_FILE, JSON.stringify(caches.stems, null, 1));
   const looped = allTracks.filter((t) => t.loop).length;
-  console.log(`[catalogue] terminé : ${allTracks.length} morceau(x), ${looped} avec boucle détectée → ${MANIFEST}`);
+  const stemmed = allTracks.filter((t) => t.channels).length;
+  console.log(`[catalogue] terminé : ${allTracks.length} morceau(x), ${looped} boucle(s), ${stemmed} avec stems → ${MANIFEST}`);
 }
 
 main().catch((err) => {

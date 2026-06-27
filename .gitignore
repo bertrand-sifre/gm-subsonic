@@ -16,8 +16,10 @@ media/*.ogg
 # `npm run library:import` pour le manifeste, le cache se remplit à la lecture).
 media/_decoded/
 media/_cache/
+media/_stems/
 media/library.generated.json
 media/loops.cache.json
+media/stems.cache.json
 
 # Script de spike (prototype de détection de boucle, non versionné).
 /_spike_loop.cjs

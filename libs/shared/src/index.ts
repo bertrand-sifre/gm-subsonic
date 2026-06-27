@@ -27,6 +27,31 @@ export interface RenderInfo {
   defaultFade: number;
 }
 
+/**
+ * Une voix isolée d'un morceau émulé (= un canal de l'APU : Pulse 1/2,
+ * Triangle, Noise, DMC, ou une voix d'extension VRC6/VRC7/FDS/MMC5/N163/5B).
+ * Rendue en stem séparé par nsftool ; le client les mixe et permet de les
+ * activer/désactiver en direct (les « couches » de la vision).
+ */
+export interface ChannelInfo {
+  id: string; // 'pulse1','pulse2','triangle','noise','dmc','vrc6-saw'…
+  label: string; // 'Pulse 1','Triangle','DMC'…
+  chip?: string; // '2A03','VRC6','VRC7','FDS','MMC5','N163','5B'
+  kind?: string; // 'pulse','triangle','noise','dmc','wave','fm','saw','pcm'
+  streamUrl: string; // stem OGG isolé
+  enabledByDefault?: boolean; // false pour une voix muette/inutilisée
+}
+
+/**
+ * Ensemble de stems synchronisés d'un morceau. Tous partagent le même
+ * sampleRate, la même longueur et la boucle de `Track.loop` → alignés à
+ * l'échantillon (rendu déterministe par nsftool).
+ */
+export interface ChannelSet {
+  sampleRate: number;
+  voices: ChannelInfo[];
+}
+
 /** Un morceau jouable. */
 export interface Track {
   id: string;
@@ -40,6 +65,11 @@ export interface Track {
   loop?: LoopInfo;
   /** Présent pour les formats émulés : lecture choisie via rendu serveur. */
   render?: RenderInfo;
+  /**
+   * Stems par voix (formats NES via nsftool). Quand présent, c'est le mode de
+   * lecture le plus riche : précédence channels > loop > render.
+   */
+  channels?: ChannelSet;
   /** URL relative de streaming, ex. `/api/stream/<id>`. */
   streamUrl: string;
 }
