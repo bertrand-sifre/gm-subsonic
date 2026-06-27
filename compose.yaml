@@ -39,5 +39,20 @@ services:
     stdin_open: true
     tty: true
 
+  # Client web Subsonic (airsonic-refix), pour TESTER notre API /rest/*.
+  # Le SPA tourne dans le NAVIGATEUR et appelle directement notre serveur :
+  # SERVER_URL est injecté côté client, donc `localhost:8787` est résolu par le
+  # navigateur de l'hôte (port mappé du service `app`) — pas besoin de réseau
+  # partagé entre conteneurs. Notre `cors()` autorise déjà le cross-origin.
+  # Ouvrir http://localhost:8788 ; identifiants au choix (auth = stub local).
+  subsonic-client:
+    image: tamland/airsonic-refix:latest
+    ports:
+      - "8788:80"
+    environment:
+      - SERVER_URL=http://localhost:8787
+    depends_on:
+      - app
+
 volumes:
   vdm_node_modules:
