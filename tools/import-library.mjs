@@ -6,15 +6,19 @@
  *
  * On NE décode PLUS l'audio ici : ces formats sont émulés et infinis, et le
  * rendu en OGG se fait À LA DEMANDE côté serveur. L'import lit les métadonnées
- * par sous-piste (nom via tag `song`, durée voulue via chunk `time`) et,
- * optionnellement (flag VDM_DETECT), détecte les POINTS DE BOUCLE
- * (tools/detect-loop.mjs) pour activer la lecture interactive côté client.
+ * par sous-piste (nom via tag `song`, durée voulue via chunk `time`) et détecte
+ * les POINTS DE BOUCLE des pistes NES (NSF/NSFe) par AUTOCORRÉLATION du log de
+ * registres APU de nsftool (tools/nsf-loop.mjs) — déterministe, rate-indépendant.
+ *
+ * La détection est AUTOMATIQUE et INCRÉMENTALE : un cache par mtime/size
+ * (media/loops.cache.json, schéma versionné) évite de re-détecter à chaque boot ;
+ * seul le 1er run froid d'une nouvelle piste coûte (~0.5-1 s à r=8000). Les
+ * formats non-NES (SPC/VGM/GBS…) ne sont pas détectés -> repli paramétrique.
  *
  * Sortie : media/library.generated.json (manifeste lu par le serveur).
  *
  * Réglages (env) :
  *   VDM_FALLBACK_SECONDS    (défaut 120)  durée par défaut si la source n'en donne pas
- *   VDM_DETECT              (défaut off)  active la détection de boucle ('1'/'true')
  *   VDM_DETECT_MIN_SECONDS  (défaut 20)   pistes plus courtes = jingles, non détectées
  *   VDM_DETECT_ONLY         (défaut '')   ne détecte que les fichiers dont le nom contient cette sous-chaîne
  *
@@ -25,7 +29,7 @@ import { spawn } from 'node:child_process';
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { detectLoop } from './detect-loop.mjs';
+import { detectLoop } from './nsf-loop.mjs';
 import { extractStems } from './nsf-stems.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -36,13 +40,20 @@ const MANIFEST = join(MEDIA_DIR, 'library.generated.json');
 const CACHE_FILE = join(MEDIA_DIR, 'loops.cache.json');
 const STEMS_CACHE_FILE = join(MEDIA_DIR, 'stems.cache.json');
 
+// Schéma du cache de boucles. Le détecteur a changé (autocorrélation register-log
+// nsftool, plus l'ancienne heuristique audio NCC) : les valeurs sous les MÊMES
+// clés `fichier#piste@mtime:size` ne sont plus comparables. Un cache de schéma
+// inférieur est traité comme vide (re-détection propre).
+const LOOP_CACHE_SCHEMA = 2;
+
 const FALLBACK_SECONDS = Number(process.env.VDM_FALLBACK_SECONDS ?? 120);
 const CONCURRENCY = 6;
 
-const DETECT = process.env.VDM_DETECT === '1' || process.env.VDM_DETECT === 'true';
+// Détection de boucle : TOUJOURS active, incrémentale (cache mtime/size). Pas de
+// porte on/off. DETECT_ONLY = filtre dev ciblé ; DETECT_MIN_SECONDS écarte les jingles.
 const DETECT_MIN_SECONDS = Number(process.env.VDM_DETECT_MIN_SECONDS ?? 20);
 const DETECT_ONLY = process.env.VDM_DETECT_ONLY ?? '';
-const DETECT_CONCURRENCY = 2; // CPU/IO-bound : plus bas que les ffprobe
+const DETECT_CONCURRENCY = 4; // nsftool CPU-bound mais rapide à r=8000
 
 const STEMS = process.env.VDM_STEMS === '1' || process.env.VDM_STEMS === 'true';
 const STEMS_ONLY = process.env.VDM_STEMS_ONLY ?? '';
@@ -138,12 +149,30 @@ async function loadJson(path) {
 }
 
 /**
- * Attache les boucles aux pistes. Le cache (par mtime/size) est TOUJOURS
- * appliqué — les boucles déjà détectées survivent à un import sans VDM_DETECT
- * (donc à un redémarrage). Le flag VDM_DETECT ne contrôle que la détection
- * NEUVE (cache miss) ; sans lui, on se contente de réappliquer le cache.
+ * Charge le cache de boucles en validant son schéma. Un cache de schéma inférieur
+ * (anciennes valeurs audio NCC sous les mêmes clés) est traité comme VIDE pour
+ * forcer une re-détection propre. `__schema` est toujours (ré)injecté : il ne
+ * collisionne jamais avec une clé `fichier#piste@mtime:size` et n'est jamais lu
+ * comme une entrée de boucle.
+ */
+async function loadLoopCache(path) {
+  const raw = await loadJson(path);
+  const cache = raw && raw.__schema === LOOP_CACHE_SCHEMA ? raw : {};
+  cache.__schema = LOOP_CACHE_SCHEMA;
+  return cache;
+}
+
+/**
+ * Attache les boucles aux pistes NES (NSF/NSFe). Détection AUTOMATIQUE et
+ * INCRÉMENTALE : le cache (par mtime/size) est d'abord réappliqué (persistance,
+ * survit aux redémarrages), puis les pistes en cache-miss sont détectées par
+ * autocorrélation du log de registres nsftool (tools/nsf-loop.mjs). Les formats
+ * non-NES sont ignorés -> repli paramétrique côté serveur.
  */
 async function detectLoops(fileName, fileStat, entries, cache) {
+  // NES uniquement : la détection register-log ne concerne que le 6502/APU.
+  if (!/\.nsfe?$/i.test(fileName)) return;
+
   const sourcePath = join(LIBRARY_DIR, fileName);
   const keyFor = (e) => `${fileName}#${e.trackIndex}@${fileStat.mtimeMs}:${fileStat.size}`;
 
@@ -153,8 +182,7 @@ async function detectLoops(fileName, fileStat, entries, cache) {
     if (cached) e.loop = cached;
   }
 
-  // 2) Détection neuve uniquement si activée et fichier non filtré.
-  if (!DETECT) return;
+  // 2) Détection neuve (cache miss). DETECT_ONLY = filtre dev ; jingles écartés.
   if (DETECT_ONLY && !fileName.includes(DETECT_ONLY)) return;
   const todo = entries.filter(
     (e) => e.defaultSeconds >= DETECT_MIN_SECONDS && cache[keyFor(e)] === undefined
@@ -163,22 +191,19 @@ async function detectLoops(fileName, fileStat, entries, cache) {
   await pool(todo, DETECT_CONCURRENCY, async (entry) => {
     const key = keyFor(entry);
     try {
-      const d = await detectLoop(sourcePath, entry.trackIndex, { defaultSeconds: entry.defaultSeconds });
-      const loop = d
-        ? {
-            startSeconds: d.loopStartSeconds,
-            lengthSeconds: d.loopLengthSeconds,
-            startSamples: d.introSamples,
-            lengthSamples: d.loopLengthSamples,
-            sampleRate: d.sampleRate,
-            confidence: d.confidence,
-          }
-        : null;
-      cache[key] = loop;
+      // nsf-loop renvoie déjà les noms de champs finaux (aucune transformation).
+      const loop = await detectLoop({
+        sourcePath,
+        trackIndex: entry.trackIndex,
+        nsftool: NSFPLAY,
+        mediaDir: MEDIA_DIR,
+        defaultSeconds: entry.defaultSeconds,
+      });
+      cache[key] = loop ?? null;
       if (loop) {
         entry.loop = loop;
         process.stdout.write(
-          `  ⟳ boucle ${entry.id} : ${loop.lengthSeconds}s (intro ${loop.startSeconds}s, conf ${loop.confidence})\n`
+          `  ⟳ boucle ${entry.id} : ${loop.lengthSeconds}s (intro ${loop.startSeconds}s)\n`
         );
       }
     } catch (err) {
@@ -195,13 +220,11 @@ async function detectLoops(fileName, fileStat, entries, cache) {
 async function extractAllStems(fileName, fileStat, entries, cache) {
   const keyFor = (e) => `${fileName}#${e.trackIndex}@${fileStat.mtimeMs}:${fileStat.size}`;
 
-  // 1) Réappliquer le cache connu (persistance).
+  // 1) Réappliquer le cache connu (persistance). La boucle n'est plus une source
+  // ici : elle vient de detectLoops (un ancien cache contenant `loop` est ignoré).
   for (const e of entries) {
     const cached = cache[keyFor(e)];
-    if (cached) {
-      e.channels = { sampleRate: cached.sampleRate, voices: cached.voices };
-      if (cached.loop) e.loop = cached.loop; // boucle moteur prime
-    }
+    if (cached) e.channels = { sampleRate: cached.sampleRate, voices: cached.voices };
   }
 
   // 2) Extraction neuve uniquement si activée, NSF/NSFe, fichier non filtré.
@@ -218,12 +241,11 @@ async function extractAllStems(fileName, fileStat, entries, cache) {
     try {
       const res = await extractStems({
         sourcePath, trackIndex: entry.trackIndex, id: entry.id,
-        audioLoop: entry.loop, mediaDir: MEDIA_DIR, nsftool: NSFPLAY,
+        loop: entry.loop, mediaDir: MEDIA_DIR, nsftool: NSFPLAY,
       });
       cache[key] = res ?? null;
       if (res) {
         entry.channels = { sampleRate: res.sampleRate, voices: res.voices };
-        if (res.loop) entry.loop = res.loop; // boucle moteur prime sur l'audio
         const active = res.voices.filter((v) => v.enabledByDefault).length;
         process.stdout.write(`  ♪ stems ${entry.id} : ${res.voices.length} voix (${active} actives)\n`);
       }
@@ -286,9 +308,9 @@ async function main() {
     return;
   }
 
-  if (DETECT) console.log('[catalogue] détection de boucle ACTIVE (VDM_DETECT)');
+  console.log('[catalogue] détection de boucle NES (autocorrélation register-log nsftool)');
   if (STEMS) console.log('[catalogue] extraction de stems ACTIVE (VDM_STEMS)');
-  const caches = { loops: await loadJson(CACHE_FILE), stems: await loadJson(STEMS_CACHE_FILE) };
+  const caches = { loops: await loadLoopCache(CACHE_FILE), stems: await loadJson(STEMS_CACHE_FILE) };
 
   const allTracks = [];
   for (const fileName of files) {
@@ -300,7 +322,8 @@ async function main() {
   }
 
   await writeFile(MANIFEST, JSON.stringify({ tracks: allTracks }, null, 2));
-  if (DETECT) await writeFile(CACHE_FILE, JSON.stringify(caches.loops, null, 1));
+  // Détection toujours active -> on persiste toujours le cache de boucles.
+  await writeFile(CACHE_FILE, JSON.stringify(caches.loops, null, 1));
   if (STEMS) await writeFile(STEMS_CACHE_FILE, JSON.stringify(caches.stems, null, 1));
   const looped = allTracks.filter((t) => t.loop).length;
   const stemmed = allTracks.filter((t) => t.channels).length;

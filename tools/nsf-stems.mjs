@@ -8,9 +8,10 @@
  *
  * Synchro : tous les canaux sont rendus par nsftool (émulation DÉTERMINISTE,
  * APU2_OPTION5/7=0) sur les MÊMES bornes -> OGG de longueur identique, alignés
- * à l'échantillon. La boucle vient du détecteur MOTEUR de nsftool (le plus
- * précis), avec repli sur la boucle audio (detect-loop.mjs) si non-convergence.
- * On n'extrait des stems que pour les pistes qui BOUCLENT (cas utile).
+ * à l'échantillon. La boucle n'est PAS détectée ici : elle est fournie par
+ * l'appelant (détection nsftool unique faite en amont, tools/nsf-loop.mjs),
+ * partagée entre l'artefact de boucle et les stems. On n'extrait des stems que
+ * pour les pistes qui BOUCLENT (cas utile).
  *
  * Repli : si nsftool est indisponible ou échoue -> renvoie null, la piste reste
  * servie par le chemin libgme (rendu paramétrique / artefact de boucle).
@@ -23,7 +24,6 @@ import { join } from 'node:path';
 const SR = 44100;
 const EPS_MS = 50; // marge de queue (futur crossfade)
 const SILENCE_RMS = 8; // RMS 16-bit en dessous = voix muette sur cette piste
-const DETECT_MS = 120000; // budget de détection moteur
 
 /** Voix de base 2A03 (toujours présentes sur NES). Index = canal nsftool. */
 const BASE = [
@@ -69,21 +69,24 @@ function run(cmd, args) {
   });
 }
 
-function mkLoop(startSeconds, lengthSeconds) {
-  return {
-    startSeconds: +startSeconds.toFixed(4),
-    lengthSeconds: +lengthSeconds.toFixed(4),
-    startSamples: Math.round(startSeconds * SR),
-    lengthSamples: Math.round(lengthSeconds * SR),
-    sampleRate: SR,
-  };
-}
-
 /**
- * @returns {{ sampleRate, voices:[{id,label,chip,kind,file,enabledByDefault}], loop }|null}
+ * @param {object} o
+ * @param {string} o.sourcePath  source NSF/NSFe
+ * @param {number} o.trackIndex  index de sous-piste 0-based
+ * @param {string} o.id          identifiant de piste (dossier de sortie)
+ * @param {object|null} o.loop   boucle déjà détectée en amont (tools/nsf-loop.mjs) :
+ *   { startSeconds, lengthSeconds, startSamples, lengthSamples, sampleRate }. null
+ *   -> pas de stems (on n'extrait que pour les pistes qui bouclent).
+ * @param {string} o.mediaDir
+ * @param {string} [o.nsftool]
+ * @returns {{ sampleRate, voices:[{id,label,chip,kind,file,enabledByDefault}] }|null}
  */
-export async function extractStems({ sourcePath, trackIndex, id, audioLoop, mediaDir, nsftool = 'nsftool' }) {
+export async function extractStems({ sourcePath, trackIndex, id, loop, mediaDir, nsftool = 'nsftool' }) {
   const t = String(trackIndex + 1); // nsftool : piste 1-based
+
+  // On ne fait des stems que pour les pistes qui bouclent (cas utile + borné).
+  // La boucle est fournie par l'appelant (détection nsftool unique en amont).
+  if (!loop) return null;
 
   // 1) Puce d'extension -> liste des voix candidates.
   const info = await run(nsftool, ['-t', t, '-l', '300', sourcePath]);
@@ -92,22 +95,12 @@ export async function extractStems({ sourcePath, trackIndex, id, audioLoop, medi
   const candidates = [...BASE];
   for (const e of EXP) if (chip & e.bit) candidates.push(...e.voices);
 
-  // 2) Boucle : détecteur moteur d'abord (plus précis), sinon boucle audio.
-  let loop = null;
-  const det = await run(nsftool, ['-t', t, '-l', String(DETECT_MS), '--detect', sourcePath]);
-  const lm = /LOOP_DETECTED start=(\d+)ms end=(\d+)ms period=(\d+)ms/.exec(det.stdout);
-  if (lm) loop = mkLoop(Number(lm[1]) / 1000, Number(lm[3]) / 1000);
-  else if (audioLoop) loop = mkLoop(audioLoop.startSeconds, audioLoop.lengthSeconds);
-
-  // On ne fait des stems que pour les pistes qui bouclent (cas utile + borné).
-  if (!loop) return null;
-
-  // 3) Bornes IDENTIQUES pour tous les canaux (clé de la synchro).
+  // 2) Bornes IDENTIQUES pour tous les canaux (clé de la synchro).
   const lengthMs = Math.round((loop.startSeconds + loop.lengthSeconds) * 1000 + EPS_MS);
   const outDir = join(mediaDir, '_stems', id);
   await mkdir(outDir, { recursive: true });
 
-  // 4) Un stem par voix : nsftool --solo -> WAV -> OGG taggé.
+  // 3) Un stem par voix : nsftool --solo -> WAV -> OGG taggé.
   const voices = [];
   for (const ch of candidates) {
     const wav = join(outDir, `${ch.id}.wav`);
@@ -130,5 +123,5 @@ export async function extractStems({ sourcePath, trackIndex, id, audioLoop, medi
   }
 
   if (voices.length === 0) { await rm(outDir, { recursive: true, force: true }); return null; }
-  return { sampleRate: SR, voices, loop };
+  return { sampleRate: SR, voices };
 }

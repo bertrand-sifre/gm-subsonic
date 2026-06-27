@@ -25,7 +25,7 @@ interface MetaTrack {
   trackIndex?: number;
   defaultSeconds?: number;
   defaultFade?: number;
-  /** Boucle détectée (tools/detect-loop.mjs) pour une piste émulée. */
+  /** Boucle détectée (tools/nsf-loop.mjs) pour une piste émulée. */
   loop?: {
     startSeconds: number;
     lengthSeconds: number;
