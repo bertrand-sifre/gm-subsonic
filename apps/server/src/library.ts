@@ -1,7 +1,7 @@
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parseFile } from 'music-metadata';
-import type { GameGroup, Library, Track } from '@vdm/shared';
+import type { ChannelInfo, GameGroup, Library, Track } from '@vdm/shared';
 
 /**
  * Entrée de manifeste. Deux familles :
@@ -33,6 +33,18 @@ interface MetaTrack {
     lengthSamples: number;
     sampleRate: number;
   };
+  /** Stems par voix (tools/nsf-stems.mjs) pour une piste NES. */
+  channels?: {
+    sampleRate: number;
+    voices: {
+      id: string;
+      label: string;
+      chip?: string;
+      kind?: string;
+      file: string;
+      enabledByDefault?: boolean;
+    }[];
+  };
 }
 
 interface MetaFile {
@@ -63,6 +75,8 @@ export interface ScanResult {
   renders: Map<string, RenderRef>;
   /** id -> référence de rendu de boucle, pour les pistes émulées bouclées. */
   loops: Map<string, LoopRenderRef>;
+  /** `${id}::${chanId}` -> chemin absolu du stem, pour les pistes à canaux. */
+  channelFiles: Map<string, string>;
 }
 
 function slugify(value: string): string {
@@ -98,11 +112,12 @@ export async function scanLibrary(mediaDir: string, libraryDir: string): Promise
   const files = new Map<string, string>();
   const renders = new Map<string, RenderRef>();
   const loops = new Map<string, LoopRenderRef>();
+  const channelFiles = new Map<string, string>();
 
   for (const entry of entries) {
     const isEmulated = entry.source != null && entry.trackIndex != null;
     const track = isEmulated
-      ? await buildEmulated(entry, libraryDir, renders, loops)
+      ? await buildEmulated(entry, libraryDir, mediaDir, renders, loops, channelFiles)
       : await buildStatic(entry, mediaDir, files);
     if (track) tracks.push(track);
   }
@@ -116,15 +131,17 @@ export async function scanLibrary(mediaDir: string, libraryDir: string): Promise
   }
   const games: GameGroup[] = [...byGame.entries()].map(([game, list]) => ({ game, tracks: list }));
 
-  return { library: { games }, files, renders, loops };
+  return { library: { games }, files, renders, loops, channelFiles };
 }
 
 /** Morceau émulé : rendu à la demande, durée/fondu par défaut depuis la source. */
 async function buildEmulated(
   entry: MetaTrack,
   libraryDir: string,
+  mediaDir: string,
   renders: Map<string, RenderRef>,
-  loops: Map<string, LoopRenderRef>
+  loops: Map<string, LoopRenderRef>,
+  channelFiles: Map<string, string>
 ): Promise<Track | null> {
   const sourcePath = join(libraryDir, entry.source!);
   try {
@@ -166,6 +183,29 @@ async function buildEmulated(
       introSamples: entry.loop.startSamples,
       loopLengthSamples: entry.loop.lengthSamples,
     });
+  }
+
+  // Stems par voix : mode le plus riche (précédence channels > loop > render).
+  if (entry.channels?.voices?.length) {
+    const voices: ChannelInfo[] = [];
+    for (const v of entry.channels.voices) {
+      const stemPath = join(mediaDir, v.file);
+      try {
+        await stat(stemPath);
+      } catch {
+        continue; // stem manquant -> on l'omet (le set reste cohérent)
+      }
+      channelFiles.set(`${id}::${v.id}`, stemPath);
+      voices.push({
+        id: v.id,
+        label: v.label,
+        chip: v.chip,
+        kind: v.kind,
+        streamUrl: `/api/stream/${id}/channel/${v.id}`,
+        enabledByDefault: v.enabledByDefault,
+      });
+    }
+    if (voices.length) track.channels = { sampleRate: entry.channels.sampleRate, voices };
   }
 
   return track;

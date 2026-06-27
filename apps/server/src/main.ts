@@ -77,6 +77,13 @@ app.get('/api/stream/:id', async (c) => {
   return c.notFound();
 });
 
+/** Streaming d'un stem isolé (une voix). 404 -> le client retombe sur le mix. */
+app.get('/api/stream/:id/channel/:chan', async (c) => {
+  const path = scan.channelFiles.get(`${c.req.param('id')}::${c.req.param('chan')}`);
+  if (!path) return c.notFound();
+  return serveFile(c, path);
+});
+
 function numParam(c: Context, name: string, fallback: number): number {
   const raw = c.req.query(name);
   const n = raw == null ? NaN : Number(raw);
