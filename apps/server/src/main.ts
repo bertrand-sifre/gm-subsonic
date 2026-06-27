@@ -162,7 +162,8 @@ function runFfmpeg(args: string[]): Promise<void> {
 
 // ---- Rendu de l'artefact de boucle [intro + 1 boucle + ε] ------------------
 
-const LOOP_EPSILON_SAMPLES = Math.round(0.05 * 44100); // marge pour un futur crossfade
+const LOOP_EPSILON_SAMPLES = Math.round(0.05 * 44100); // queue rendue après loopEnd (sert au crossfade)
+const XFADE_SAMPLES = Math.round(0.025 * 44100); // durée du crossfade de jointure (~25 ms)
 
 /** Garantit l'artefact de boucle en cache (clé stable, sans paramètre). */
 async function ensureLoopRendered(id: string, ref: LoopRenderRef): Promise<string> {
@@ -179,18 +180,21 @@ async function ensureLoopRendered(id: string, ref: LoopRenderRef): Promise<strin
   return outPath;
 }
 
-/** [intro + 1 boucle + ε] coupé au sample près, avec tags LOOPSTART/LOOPLENGTH. */
-function renderLoop(ref: LoopRenderRef, outPath: string): Promise<void> {
+/** Artefact de boucle = [intro + 1 boucle] à jointure CROSSFADÉE (sans clic). */
+async function renderLoop(ref: LoopRenderRef, outPath: string): Promise<void> {
+  const wav = `${outPath}.tmp.wav`;
   const endSample = ref.introSamples + ref.loopLengthSamples + LOOP_EPSILON_SAMPLES;
-  return runFfmpeg([
-    '-hide_banner', '-loglevel', 'error', '-y',
-    '-f', 'libgme', '-track_index', String(ref.trackIndex), '-sample_rate', '44100',
-    '-i', ref.sourcePath,
-    '-af', `atrim=end_sample=${endSample}`,
-    '-metadata', `LOOPSTART=${ref.introSamples}`,
-    '-metadata', `LOOPLENGTH=${ref.loopLengthSamples}`,
-    '-c:a', 'libvorbis', '-qscale:a', '5', outPath,
-  ]);
+  try {
+    await runCmd('ffmpeg', [
+      '-hide_banner', '-loglevel', 'error', '-y',
+      '-f', 'libgme', '-track_index', String(ref.trackIndex), '-sample_rate', '44100',
+      '-i', ref.sourcePath,
+      '-af', `atrim=end_sample=${endSample}`, wav,
+    ]);
+    await encodeSeamlessOgg(wav, outPath, ref.introSamples, ref.loopLengthSamples);
+  } finally {
+    await rm(wav, { force: true }).catch(() => {});
+  }
 }
 
 // ---- Rendu d'un stem (une voix) à la demande via nsftool -------------------
@@ -205,6 +209,63 @@ function runCmd(cmd: string, args: string[]): Promise<void> {
       code === 0 ? resolve() : reject(new Error(`${cmd} (code ${code}) : ${stderr.trim()}`))
     );
   });
+}
+
+/**
+ * Filtre ffmpeg : transforme [intro + boucle + ε] en [intro + corps bouclable].
+ * La queue ε (début de boucle rejoué, continu en phase avec la fin) est
+ * crossfadée (équiénergie qsin) sur le début de la boucle -> le corps boucle
+ * sans clic en lecture native. La fin du corps == fin de boucle, et le début du
+ * corps reprend exactement la queue -> jointure parfaitement continue.
+ */
+function seamlessFilter(introSamples: number, loopLengthSamples: number, xfade: number): string {
+  const I = introSamples;
+  const L = loopLengthSamples;
+  const X = xfade;
+  const hasIntro = I > 0;
+  const splitN = hasIntro ? 4 : 3;
+  const parts: string[] = [
+    `[0:a]asplit=${splitN}` + Array.from({ length: splitN }, (_, i) => `[s${i}]`).join(''),
+  ];
+  let si = 0;
+  let concat = '';
+  let nConcat = 0;
+  if (hasIntro) {
+    parts.push(`[s${si++}]atrim=start_sample=0:end_sample=${I},asetpts=PTS-STARTPTS[intro]`);
+    concat += '[intro]';
+    nConcat++;
+  }
+  parts.push(`[s${si++}]atrim=start_sample=${I}:end_sample=${I + X},asetpts=PTS-STARTPTS[head]`);
+  parts.push(`[s${si++}]atrim=start_sample=${I + L}:end_sample=${I + L + X},asetpts=PTS-STARTPTS[tail]`);
+  parts.push(`[s${si++}]atrim=start_sample=${I + X}:end_sample=${I + L},asetpts=PTS-STARTPTS[mid]`);
+  parts.push(`[tail][head]acrossfade=ns=${X}:c1=qsin:c2=qsin[seam]`);
+  concat += '[seam][mid]';
+  nConcat += 2;
+  parts.push(`${concat}concat=n=${nConcat}:v=0:a=1[out]`);
+  return parts.join(';');
+}
+
+/** Encode un WAV [intro+boucle+ε] en OGG bouclable (crossfade) + tags de boucle. */
+function encodeSeamlessOgg(
+  wav: string,
+  outPath: string,
+  introSamples: number,
+  loopLengthSamples: number
+): Promise<void> {
+  const X = Math.min(XFADE_SAMPLES, Math.floor(loopLengthSamples / 4));
+  const args = ['-hide_banner', '-loglevel', 'error', '-y', '-i', wav];
+  if (X >= 64) {
+    args.push('-filter_complex', seamlessFilter(introSamples, loopLengthSamples, X), '-map', '[out]');
+  } else {
+    // Boucle trop courte pour un crossfade -> simple coupe à loopEnd.
+    args.push('-af', `atrim=end_sample=${introSamples + loopLengthSamples}`);
+  }
+  args.push(
+    '-metadata', `LOOPSTART=${introSamples}`,
+    '-metadata', `LOOPLENGTH=${loopLengthSamples}`,
+    '-c:a', 'libvorbis', '-qscale:a', '4', outPath
+  );
+  return runCmd('ffmpeg', args);
 }
 
 /** Garantit le stem d'une voix en cache (clé stable par piste+canal). */
@@ -236,13 +297,7 @@ async function renderChannelStem(ref: ChannelRenderRef, outPath: string): Promis
       '-t', String(ref.trackIndex + 1), '-l', String(lengthMs), '-r', '44100', '-c', '1',
       '--solo', String(ref.channelIndex), '-o', wav, ref.sourcePath,
     ]);
-    await runCmd('ffmpeg', [
-      '-hide_banner', '-loglevel', 'error', '-y', '-i', wav,
-      '-c:a', 'libvorbis', '-qscale:a', '4',
-      '-metadata', `LOOPSTART=${ref.introSamples}`,
-      '-metadata', `LOOPLENGTH=${ref.loopLengthSamples}`,
-      outPath,
-    ]);
+    await encodeSeamlessOgg(wav, outPath, ref.introSamples, ref.loopLengthSamples);
   } finally {
     await rm(wav, { force: true }).catch(() => {});
   }
