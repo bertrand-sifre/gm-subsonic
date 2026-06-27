@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import type { Library, PlaybackMode, Track } from '@vdm/shared';
   import { fetchLibrary } from './lib/api';
-  import { LoopPlayer } from './lib/LoopPlayer';
+  import { LoopPlayer, type Progress } from './lib/LoopPlayer';
 
   let library: Library | null = null;
   let error = '';
@@ -20,6 +20,12 @@
 
   // Activation des voix (stems) de la piste courante : id de canal -> booléen.
   let channelOn: Record<string, boolean> = {};
+
+  // Visualisation live (pilotée par l'horloge audio) : progression + scopes.
+  let progress: Progress | null = null;
+  let scopeCanvases: Record<string, HTMLCanvasElement> = {};
+  let raf = 0;
+  const scopeBuf = new Uint8Array(1024);
 
   // Durée par défaut de la piste émulée courante (0 si non émulée).
   $: defSeconds = current?.render?.defaultSeconds ?? 0;
@@ -132,6 +138,115 @@
     const s = Math.round(seconds % 60);
     return `${m}:${String(s).padStart(2, '0')}`;
   }
+
+  // --- Visualisation live -----------------------------------------------------
+
+  // Couleur d'une voix d'après son type de canal APU (repère visuel).
+  const KIND_COLOR: Record<string, string> = {
+    pulse: '#6c5ce7',
+    triangle: '#2ec5a0',
+    noise: '#c77dff',
+    dmc: '#ff9f43',
+    pcm: '#ff9f43',
+    saw: '#ff6b9d',
+    wave: '#4dd0e1',
+    fm: '#ffd166',
+  };
+  function voiceColor(id: string): string {
+    if (id === '__main__') return '#8b7cf0';
+    const v = current?.channels?.voices.find((x) => x.id === id);
+    return (v?.kind && KIND_COLOR[v.kind]) || '#8b7cf0';
+  }
+
+  // Boucle d'animation : lue à chaque frame tant que ça joue.
+  function startLoop() {
+    if (raf) return;
+    const frame = () => {
+      progress = player.getProgress();
+      const analysers = player.getAnalysers();
+      for (const [id, an] of analysers) {
+        const c = scopeCanvases[id];
+        if (c) drawScope(c, an, id);
+      }
+      raf = requestAnimationFrame(frame);
+    };
+    raf = requestAnimationFrame(frame);
+  }
+  function stopLoop() {
+    if (raf) cancelAnimationFrame(raf);
+    raf = 0;
+    progress = null;
+  }
+  $: if (status === 'playing') startLoop();
+  else stopLoop();
+
+  // Trace l'oscilloscope d'une voix (onde temporelle de son AnalyserNode).
+  function drawScope(canvas: HTMLCanvasElement, analyser: AnalyserNode, id: string): void {
+    const g = canvas.getContext('2d');
+    if (!g) return;
+    const dpr = window.devicePixelRatio || 1;
+    const cssW = canvas.clientWidth || 1;
+    const cssH = canvas.clientHeight || 1;
+    if (canvas.width !== Math.round(cssW * dpr)) {
+      canvas.width = Math.round(cssW * dpr);
+      canvas.height = Math.round(cssH * dpr);
+    }
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, cssW, cssH);
+
+    analyser.getByteTimeDomainData(scopeBuf);
+    const on = id === '__main__' ? true : channelOn[id] !== false;
+
+    // Ligne médiane (zéro).
+    g.strokeStyle = 'rgba(255,255,255,0.06)';
+    g.lineWidth = 1;
+    g.beginPath();
+    g.moveTo(0, cssH / 2);
+    g.lineTo(cssW, cssH / 2);
+    g.stroke();
+
+    // Onde.
+    g.strokeStyle = on ? voiceColor(id) : 'rgba(155,150,184,0.4)';
+    g.lineWidth = 1.5;
+    g.globalAlpha = on ? 1 : 0.5;
+    g.beginPath();
+    const n = scopeBuf.length;
+    for (let i = 0; i < n; i++) {
+      const x = (i / (n - 1)) * cssW;
+      const y = (scopeBuf[i] / 255) * cssH;
+      if (i === 0) g.moveTo(x, y);
+      else g.lineTo(x, y);
+    }
+    g.stroke();
+    g.globalAlpha = 1;
+  }
+
+  // Position de la tête de lecture (% de la barre intro+boucle).
+  function computePlayPct(p: Progress | null): number {
+    if (!p) return 0;
+    if (p.phase === 'linear') return p.frac * 100;
+    const total = p.introDur + p.loopDur;
+    if (total <= 0) return 0;
+    const introW = (p.introDur / total) * 100;
+    if (p.phase === 'intro') return introW * p.frac;
+    if (p.phase === 'loop') return introW + (100 - introW) * p.frac;
+    return 100; // queue : fin de la zone de boucle
+  }
+
+  // Libellé du compteur : « Intro », « Boucle 2/3 », « Boucle 4 » (infini), « Queue ».
+  function progressLabel(p: Progress | null): string {
+    if (!p || p.phase === 'linear') return '';
+    if (p.phase === 'intro') return 'Intro';
+    if (p.phase === 'tail') return 'Queue';
+    return p.totalLoops != null ? `Boucle ${p.iteration}/${p.totalLoops}` : `Boucle ${p.iteration}`;
+  }
+
+  $: introPct =
+    progress && progress.phase !== 'linear' && progress.introDur + progress.loopDur > 0
+      ? (progress.introDur / (progress.introDur + progress.loopDur)) * 100
+      : 0;
+  $: playPct = computePlayPct(progress);
+  $: counterLabel = progressLabel(progress);
 </script>
 
 <main>
@@ -167,14 +282,40 @@
       {/if}
     </div>
 
+    {#if status === 'playing' && progress}
+      <div class="progress">
+        {#if !current?.channels}
+          <!-- Pas de stems : oscilloscope du mix. -->
+          <canvas class="scope mix" bind:this={scopeCanvases['__main__']}></canvas>
+        {/if}
+        <div class="bar-row">
+          <div class="bar" class:linear={progress.phase === 'linear'}>
+            {#if progress.phase !== 'linear'}
+              <div class="seg intro" style="width:{introPct}%"><span>intro</span></div>
+              <div class="seg loop" style="width:{100 - introPct}%"><span>boucle</span></div>
+            {:else}
+              <div class="seg loop" style="width:100%"></div>
+            {/if}
+            <div class="playhead" style="left:{playPct}%"></div>
+          </div>
+          {#if counterLabel}
+            <div class="counter" class:active={progress.phase === 'loop'}>{counterLabel}</div>
+          {/if}
+        </div>
+      </div>
+    {/if}
+
     {#if current?.channels}
       <div class="channels">
         <span class="chan-label">Voix</span>
         {#each current.channels.voices as v}
-          <label class="chan">
-            <input type="checkbox" checked={channelOn[v.id]} on:change={() => toggleChannel(v.id)} />
-            {v.label}
-          </label>
+          <div class="chan" class:off={!channelOn[v.id]}>
+            <label class="chan-toggle">
+              <input type="checkbox" checked={channelOn[v.id]} on:change={() => toggleChannel(v.id)} />
+              <span>{v.label}</span>
+            </label>
+            <canvas class="scope" bind:this={scopeCanvases[v.id]}></canvas>
+          </div>
         {/each}
       </div>
     {/if}
@@ -446,21 +587,112 @@
     flex: 1 1 100%;
     display: flex;
     flex-wrap: wrap;
-    align-items: center;
-    gap: 0.5rem 0.9rem;
+    align-items: flex-start;
+    gap: 0.6rem;
   }
   .chan-label {
     font-size: 0.85rem;
     color: #9b96b8;
+    align-self: center;
   }
   .chan {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    flex: 1 1 120px;
+    min-width: 110px;
+    max-width: 180px;
+    background: #15131f;
+    border: 1px solid #2a2640;
+    border-radius: 8px;
+    padding: 0.4rem 0.5rem;
+  }
+  .chan.off {
+    opacity: 0.55;
+  }
+  .chan-toggle {
     flex-direction: row;
     align-items: center;
     gap: 0.35rem;
-    font-size: 0.85rem;
+    font-size: 0.82rem;
     color: #e8e6f0;
   }
   .chan input {
     width: auto;
+  }
+
+  /* Progression intro/boucle + compteur de boucles. */
+  .progress {
+    flex: 1 1 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .bar-row {
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+  }
+  .bar {
+    position: relative;
+    flex: 1;
+    height: 22px;
+    display: flex;
+    border-radius: 6px;
+    overflow: hidden;
+    background: #15131f;
+    border: 1px solid #2a2640;
+  }
+  .seg {
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: rgba(255, 255, 255, 0.5);
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .seg.intro {
+    background: rgba(108, 92, 231, 0.22);
+    border-right: 1px solid #3a3553;
+  }
+  .seg.loop {
+    background: rgba(46, 197, 160, 0.18);
+  }
+  .playhead {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    margin-left: -1px;
+    background: #fff;
+    box-shadow: 0 0 6px rgba(255, 255, 255, 0.8);
+  }
+  .counter {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #cfcae8;
+    white-space: nowrap;
+    min-width: 5.5rem;
+    text-align: right;
+  }
+  .counter.active {
+    color: #7fe9cf;
+  }
+
+  /* Oscilloscopes (une voix = une onde). */
+  .scope {
+    display: block;
+    width: 100%;
+    height: 30px;
+    border-radius: 6px;
+    background: #15131f;
+    border: 1px solid #2a2640;
+  }
+  .scope.mix {
+    height: 48px;
   }
 </style>

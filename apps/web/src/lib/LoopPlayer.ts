@@ -31,6 +31,34 @@ interface Plan {
   endOfLoops: number;
 }
 
+/** État de planification figé au play(), pour calculer la progression à l'horloge audio. */
+interface Timing {
+  /** Instant de départ (horloge du contexte). */
+  t0: number;
+  introDur: number;
+  loopDur: number;
+  /** Durée totale du buffer (= intro+boucle pour un artefact émulé, +queue sinon). */
+  bufferDur: number;
+  /** Aucune boucle (mode `once` ou piste sans boucle) → progression linéaire. */
+  noLoop: boolean;
+  /** Nombre de boucles visé (`null` = infini). */
+  totalLoops: number | null;
+}
+
+/** Progression instantanée, pour la barre intro/boucle + le compteur de boucles. */
+export interface Progress {
+  /** Phase courante du morceau. */
+  phase: 'intro' | 'loop' | 'tail' | 'linear';
+  /** Avancement dans la phase courante (0..1). */
+  frac: number;
+  introDur: number;
+  loopDur: number;
+  /** Boucle courante (1-based) ; 0 pendant l'intro / en linéaire. */
+  iteration: number;
+  /** Total de boucles (`null` = infini). */
+  totalLoops: number | null;
+}
+
 export class LoopPlayer {
   private ctx: AudioContext | null = null;
   private track: Track | null = null;
@@ -39,8 +67,12 @@ export class LoopPlayer {
   private voices = new Map<string, Voice>();
   /** Gains de canal créés au play (id -> GainNode), pour le toggle en direct. */
   private channelGains = new Map<string, GainNode>();
+  /** Analyseurs par voix (id -> AnalyserNode), pour visualiser chaque voix en direct. */
+  private analysers = new Map<string, AnalyserNode>();
   private master: GainNode | null = null;
   private sources: AudioBufferSourceNode[] = [];
+  /** Planification figée au play(), pour la progression (null si arrêté). */
+  private timing: Timing | null = null;
 
   /** Callback appelé quand la lecture se termine d'elle-même (pas sur stop()). */
   onEnded: (() => void) | null = null;
@@ -118,13 +150,28 @@ export class LoopPlayer {
 
     const plan: Plan = { noLoop, mode: options.mode, loop, t0, endOfLoops };
 
-    // Une source (ou deux) par voix, via son gain de canal -> master.
+    const firstBuffer = this.voices.values().next().value!.buffer;
+    this.timing = {
+      t0,
+      introDur,
+      loopDur,
+      bufferDur: firstBuffer.duration,
+      noLoop,
+      totalLoops: noLoop || options.mode === 'loopInfinite' ? null : repeats,
+    };
+
+    // Une source (ou deux) par voix, via son gain de canal -> analyseur -> master.
     let timekeeper: AudioBufferSourceNode | null = null;
     for (const [id, voice] of this.voices) {
       const chGain = ctx.createGain();
       chGain.gain.value = voice.enabled ? 1 : 0;
-      chGain.connect(master);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.6;
+      chGain.connect(analyser);
+      analyser.connect(master);
       this.channelGains.set(id, chGain);
+      this.analysers.set(id, analyser);
 
       const terminal = this.scheduleVoice(voice.buffer, chGain, plan);
       if (terminal && !timekeeper) timekeeper = terminal;
@@ -183,6 +230,57 @@ export class LoopPlayer {
     }
   }
 
+  /** Analyseurs par voix (id -> AnalyserNode) pour visualiser chaque voix. */
+  getAnalysers(): Map<string, AnalyserNode> {
+    return this.analysers;
+  }
+
+  /**
+   * Progression instantanée, calculée à l'HORLOGE AUDIO (et donc figée pendant
+   * une pause `suspend()`, comme l'audio). `null` si rien n'est planifié.
+   */
+  getProgress(): Progress | null {
+    if (!this.ctx || !this.timing) return null;
+    const t = this.timing;
+    const elapsed = Math.max(0, this.ctx.currentTime - t.t0);
+
+    if (t.noLoop) {
+      const dur = t.bufferDur || 1;
+      return { phase: 'linear', frac: Math.min(1, elapsed / dur), introDur: 0, loopDur: dur, iteration: 0, totalLoops: null };
+    }
+    if (elapsed < t.introDur) {
+      return { phase: 'intro', frac: t.introDur ? elapsed / t.introDur : 1, introDur: t.introDur, loopDur: t.loopDur, iteration: 0, totalLoops: t.totalLoops };
+    }
+
+    const loopElapsed = elapsed - t.introDur;
+    const iter = Math.floor(loopElapsed / t.loopDur); // 0-based
+
+    // loopCount / loopCountFade : au-delà du nombre de boucles -> queue éventuelle.
+    if (t.totalLoops != null && iter >= t.totalLoops) {
+      const loopEnd = t.introDur + t.loopDur;
+      const tailDur = Math.max(0, t.bufferDur - loopEnd);
+      const tailElapsed = loopElapsed - t.totalLoops * t.loopDur;
+      return {
+        phase: 'tail',
+        frac: tailDur ? Math.min(1, tailElapsed / tailDur) : 1,
+        introDur: t.introDur,
+        loopDur: t.loopDur,
+        iteration: t.totalLoops,
+        totalLoops: t.totalLoops,
+      };
+    }
+
+    const posInLoop = loopElapsed - iter * t.loopDur;
+    return {
+      phase: 'loop',
+      frac: t.loopDur ? posInLoop / t.loopDur : 0,
+      introDur: t.introDur,
+      loopDur: t.loopDur,
+      iteration: iter + 1,
+      totalLoops: t.totalLoops,
+    };
+  }
+
   stop(): void {
     for (const src of this.sources) {
       try {
@@ -196,6 +294,9 @@ export class LoopPlayer {
     this.sources = [];
     for (const g of this.channelGains.values()) g.disconnect();
     this.channelGains.clear();
+    for (const a of this.analysers.values()) a.disconnect();
+    this.analysers.clear();
+    this.timing = null;
     if (this.master) {
       this.master.disconnect();
       this.master = null;
