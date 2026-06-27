@@ -1,18 +1,19 @@
 /**
- * Routes HTTP (Hono). Les handlers restent FINS : ils résolvent l'id dans le
- * `ScanResult`, délèguent le rendu à `render/` (cache + dédoublonnage) et le
- * service du fichier à `serve-file.ts`.
+ * Routes HTTP (Hono). Les handlers restent FINS : ils résolvent l'id via
+ * `resolveStream` (partagé avec l'API Subsonic), délèguent le rendu à `render/`
+ * (cache + dédoublonnage) et le service du fichier à `serve-file.ts`.
  *
- * Précédence du streaming d'un id émulé : artefact de boucle (si boucle détectée
- * et aucun paramètre) → rendu paramétrique (durée/fondu). Repli en cascade.
+ * L'API maison vit sous `/api/*` ; l'API Subsonic (montée par `mountSubsonic`)
+ * vit sous `/rest/*` — les deux systèmes coexistent sur le même serveur.
  */
 
-import { Hono, type Context } from 'hono';
+import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { MAX_FADE, MAX_SECONDS } from '../config.js';
 import type { ScanResult } from '../library/types.js';
-import { ensureChannelRender, ensureLoopRender, ensureParametricRender } from '../render/index.js';
+import { ensureChannelRender } from '../render/index.js';
+import { resolveStream } from '../stream.js';
 import { serveFile } from './serve-file.js';
+import { mountSubsonic } from './subsonic/index.js';
 
 export function createApp(scan: ScanResult): Hono {
   const app = new Hono();
@@ -22,43 +23,17 @@ export function createApp(scan: ScanResult): Hono {
 
   app.get('/api/library', (c) => c.json(scan.library));
 
-  /**
-   * Streaming d'un morceau.
-   *  - statique : on sert le fichier tel quel (Range/206) ;
-   *  - émulé bouclé + aucun paramètre : artefact de boucle (lecture interactive) ;
-   *  - émulé : OGG rendu à la demande via libgme (durée + fondu demandés).
-   */
+  /** Streaming d'un morceau (statique, artefact de boucle, ou OGG paramétrique). */
   app.get('/api/stream/:id', async (c) => {
     const id = c.req.param('id');
-
-    const staticPath = scan.files.get(id);
-    if (staticPath) return serveFile(c, staticPath);
-
-    // Boucle détectée + aucun paramètre explicite -> artefact de boucle.
-    // Échec -> repli paramétrique ci-dessous.
-    const loopRef = scan.loops.get(id);
-    if (loopRef && c.req.query('seconds') == null && c.req.query('fade') == null) {
-      try {
-        return serveFile(c, await ensureLoopRender(id, loopRef));
-      } catch (err) {
-        console.error(`[vdm] rendu boucle échoué (${id}), repli paramétrique :`, err);
-      }
+    try {
+      const path = await resolveStream(scan, id, c.req.query('seconds'), c.req.query('fade'));
+      if (!path) return c.notFound();
+      return serveFile(c, path);
+    } catch (err) {
+      console.error(`[vdm] rendu échoué (${id}):`, err);
+      return c.text('render failed', 500);
     }
-
-    const ref = scan.renders.get(id);
-    if (ref) {
-      const seconds = clamp(numParam(c, 'seconds', ref.defaultSeconds), 1, MAX_SECONDS);
-      const fade = clamp(numParam(c, 'fade', ref.defaultFade), 0, MAX_FADE);
-      try {
-        const rendered = await ensureParametricRender(id, ref, Math.round(seconds), round1(fade));
-        return serveFile(c, rendered);
-      } catch (err) {
-        console.error(`[vdm] rendu échoué (${id}):`, err);
-        return c.text('render failed', 500);
-      }
-    }
-
-    return c.notFound();
   });
 
   /** Streaming d'un stem (une voix), rendu à la demande. 404 -> repli sur le mix. */
@@ -75,19 +50,8 @@ export function createApp(scan: ScanResult): Hono {
     }
   });
 
+  // API Subsonic minimale (browse + play), montée sur /rest/*.
+  mountSubsonic(app, scan);
+
   return app;
-}
-
-function numParam(c: Context, name: string, fallback: number): number {
-  const raw = c.req.query(name);
-  const n = raw == null ? NaN : Number(raw);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-function clamp(v: number, lo: number, hi: number): number {
-  return Math.min(hi, Math.max(lo, v));
-}
-
-function round1(v: number): number {
-  return Math.round(v * 10) / 10;
 }
