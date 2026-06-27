@@ -1,31 +1,27 @@
 /**
  * tools/nsf-stems.mjs
  *
- * Extrait les STEMS par voix d'un morceau NES via nsftool (cœur nsfplay) :
- * une piste audio isolée par canal APU (Pulse 1/2, Triangle, Noise, DMC, +
- * voix d'extension). Le client les mixe et permet de les activer/désactiver
- * en direct (les « couches » de la vision).
+ * CATALOGUE des voix (stems) d'un morceau NES, à l'import. Léger et instantané :
+ * on lit juste la puce (en-tête NSF) pour savoir quelles voix existent — AUCUN
+ * rendu audio ici. Le rendu de chaque voix se fait À LA DEMANDE côté serveur
+ * (apps/server/src/main.ts), comme l'artefact de boucle, puis est mis en cache.
  *
- * Synchro : tous les canaux sont rendus par nsftool (émulation DÉTERMINISTE,
- * APU2_OPTION5/7=0) sur les MÊMES bornes -> OGG de longueur identique, alignés
- * à l'échantillon. La boucle n'est PAS détectée ici : elle est fournie par
- * l'appelant (détection nsftool unique faite en amont, tools/nsf-loop.mjs),
- * partagée entre l'artefact de boucle et les stems. On n'extrait des stems que
- * pour les pistes qui BOUCLENT (cas utile).
+ * Une voix = un canal de l'APU (Pulse 1/2, Triangle, Noise, DMC) ou d'une
+ * extension (VRC6/VRC7/FDS/MMC5/N163/5B). Le client les mixe et permet de les
+ * activer/désactiver en direct (les « couches » de la vision).
  *
- * Repli : si nsftool est indisponible ou échoue -> renvoie null, la piste reste
- * servie par le chemin libgme (rendu paramétrique / artefact de boucle).
+ * On ne catalogue des voix que pour les pistes qui BOUCLENT : les bornes de
+ * rendu des stems viennent de la boucle (détectée par tools/nsf-loop.mjs).
+ *
+ * Repli : nsftool indisponible / échec -> renvoie null, la piste reste servie
+ * par le chemin libgme (rendu paramétrique / artefact de boucle).
  */
 
 import { spawn } from 'node:child_process';
-import { mkdir, rm } from 'node:fs/promises';
-import { join } from 'node:path';
 
 const SR = 44100;
-const EPS_MS = 50; // marge de queue (futur crossfade)
-const SILENCE_RMS = 8; // RMS 16-bit en dessous = voix muette sur cette piste
 
-/** Voix de base 2A03 (toujours présentes sur NES). Index = canal nsftool. */
+/** Voix de base 2A03 (toujours présentes sur NES). channelIndex = canal nsftool. */
 const BASE = [
   { idx: 0, id: 'pulse1', label: 'Pulse 1', chip: '2A03', kind: 'pulse' },
   { idx: 1, id: 'pulse2', label: 'Pulse 2', chip: '2A03', kind: 'pulse' },
@@ -70,58 +66,34 @@ function run(cmd, args) {
 }
 
 /**
+ * Liste les voix d'une piste NES (instantané : une lecture de la puce, pas de
+ * rendu). Le rendu de chaque voix est fait à la demande par le serveur.
+ *
  * @param {object} o
  * @param {string} o.sourcePath  source NSF/NSFe
  * @param {number} o.trackIndex  index de sous-piste 0-based
- * @param {string} o.id          identifiant de piste (dossier de sortie)
- * @param {object|null} o.loop   boucle déjà détectée en amont (tools/nsf-loop.mjs) :
- *   { startSeconds, lengthSeconds, startSamples, lengthSamples, sampleRate }. null
- *   -> pas de stems (on n'extrait que pour les pistes qui bouclent).
- * @param {string} o.mediaDir
+ * @param {object|null} o.loop   boucle détectée en amont (nsf-loop) ; null -> pas de voix
  * @param {string} [o.nsftool]
- * @returns {{ sampleRate, voices:[{id,label,chip,kind,file,enabledByDefault}] }|null}
+ * @returns {{ sampleRate, voices:[{id,label,chip,kind,channelIndex,enabledByDefault}] }|null}
  */
-export async function extractStems({ sourcePath, trackIndex, id, loop, mediaDir, nsftool = 'nsftool' }) {
+export async function catalogStems({ sourcePath, trackIndex, loop, nsftool = 'nsftool' }) {
+  if (!loop) return null; // voix seulement pour les pistes qui bouclent
   const t = String(trackIndex + 1); // nsftool : piste 1-based
 
-  // On ne fait des stems que pour les pistes qui bouclent (cas utile + borné).
-  // La boucle est fournie par l'appelant (détection nsftool unique en amont).
-  if (!loop) return null;
-
-  // 1) Puce d'extension -> liste des voix candidates.
   const info = await run(nsftool, ['-t', t, '-l', '300', sourcePath]);
   if (info.code !== 0) return null; // nsftool indispo/échec -> repli libgme
   const chip = parseInt((/chip=0x([0-9a-f]+)/i.exec(info.stdout) || [])[1] || '0', 16);
+
   const candidates = [...BASE];
   for (const e of EXP) if (chip & e.bit) candidates.push(...e.voices);
 
-  // 2) Bornes IDENTIQUES pour tous les canaux (clé de la synchro).
-  const lengthMs = Math.round((loop.startSeconds + loop.lengthSeconds) * 1000 + EPS_MS);
-  const outDir = join(mediaDir, '_stems', id);
-  await mkdir(outDir, { recursive: true });
-
-  // 3) Un stem par voix : nsftool --solo -> WAV -> OGG taggé.
-  const voices = [];
-  for (const ch of candidates) {
-    const wav = join(outDir, `${ch.id}.wav`);
-    const ogg = join(outDir, `${ch.id}.ogg`);
-    const r = await run(nsftool, ['-t', t, '-l', String(lengthMs), '-r', String(SR), '-c', '1', '--solo', String(ch.idx), '-o', wav, sourcePath]);
-    if (r.code !== 0) { await rm(wav, { force: true }); continue; }
-    const rms = Number((/RMS=([\d.]+)/.exec(r.stdout) || [])[1] || 0);
-
-    const enc = ['-hide_banner', '-loglevel', 'error', '-y', '-i', wav, '-c:a', 'libvorbis', '-qscale:a', '4',
-      '-metadata', `LOOPSTART=${loop.startSamples}`, '-metadata', `LOOPLENGTH=${loop.lengthSamples}`, ogg];
-    const e2 = await run('ffmpeg', enc);
-    await rm(wav, { force: true });
-    if (e2.code !== 0) continue;
-
-    voices.push({
-      id: ch.id, label: ch.label, chip: ch.chip, kind: ch.kind,
-      file: `_stems/${id}/${ch.id}.ogg`,
-      enabledByDefault: rms >= SILENCE_RMS,
-    });
-  }
-
-  if (voices.length === 0) { await rm(outDir, { recursive: true, force: true }); return null; }
+  const voices = candidates.map((ch) => ({
+    id: ch.id,
+    label: ch.label,
+    chip: ch.chip,
+    kind: ch.kind,
+    channelIndex: ch.idx,
+    enabledByDefault: true,
+  }));
   return { sampleRate: SR, voices };
 }

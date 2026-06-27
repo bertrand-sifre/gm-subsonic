@@ -30,7 +30,7 @@ import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { detectLoop } from './nsf-loop.mjs';
-import { extractStems } from './nsf-stems.mjs';
+import { catalogStems } from './nsf-stems.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -55,10 +55,6 @@ const DETECT_MIN_SECONDS = Number(process.env.VDM_DETECT_MIN_SECONDS ?? 20);
 const DETECT_ONLY = process.env.VDM_DETECT_ONLY ?? '';
 const DETECT_CONCURRENCY = 4; // nsftool CPU-bound mais rapide à r=8000
 
-const STEMS = process.env.VDM_STEMS === '1' || process.env.VDM_STEMS === 'true';
-const STEMS_ONLY = process.env.VDM_STEMS_ONLY ?? '';
-const STEMS_MIN_SECONDS = Number(process.env.VDM_STEMS_MIN_SECONDS ?? 20);
-const STEMS_CONCURRENCY = 1; // très lourd (N canaux × longueur) -> séquentiel
 const NSFPLAY = process.env.VDM_NSFPLAY ?? 'nsftool';
 
 /** Formats émulés/séquencés gérés par le demuxer libgme de ffmpeg. */
@@ -214,43 +210,34 @@ async function detectLoops(fileName, fileStat, entries, cache) {
 }
 
 /**
- * Attache les stems par voix (via nsftool). Cache TOUJOURS appliqué
- * (persistance) ; VDM_STEMS ne contrôle que l'extraction neuve. NSF/NSFe only.
+ * Catalogue les voix (stems) des pistes NES qui bouclent. AUTOMATIQUE et
+ * INCRÉMENTAL : cache d'abord réappliqué (persistance), puis pistes en cache-miss
+ * cataloguées — INSTANTANÉ (pas de rendu, juste la liste des voix d'après la
+ * puce). Le rendu de chaque voix se fait À LA DEMANDE côté serveur.
  */
-async function extractAllStems(fileName, fileStat, entries, cache) {
+async function catalogAllStems(fileName, fileStat, entries, cache) {
+  if (!/\.nsfe?$/i.test(fileName)) return; // NES uniquement
+  const sourcePath = join(LIBRARY_DIR, fileName);
   const keyFor = (e) => `${fileName}#${e.trackIndex}@${fileStat.mtimeMs}:${fileStat.size}`;
 
-  // 1) Réappliquer le cache connu (persistance). La boucle n'est plus une source
-  // ici : elle vient de detectLoops (un ancien cache contenant `loop` est ignoré).
+  // 1) Réappliquer le cache (persistance) — seulement si la piste a une boucle.
   for (const e of entries) {
     const cached = cache[keyFor(e)];
-    if (cached) e.channels = { sampleRate: cached.sampleRate, voices: cached.voices };
+    if (cached && e.loop) e.channels = { sampleRate: cached.sampleRate, voices: cached.voices };
   }
 
-  // 2) Extraction neuve uniquement si activée, NSF/NSFe, fichier non filtré.
-  if (!STEMS) return;
-  if (!/\.nsfe?$/i.test(fileName)) return;
-  if (STEMS_ONLY && !fileName.includes(STEMS_ONLY)) return;
-  const sourcePath = join(LIBRARY_DIR, fileName);
-  const todo = entries.filter(
-    (e) => e.defaultSeconds >= STEMS_MIN_SECONDS && cache[keyFor(e)] === undefined
-  );
-
-  await pool(todo, STEMS_CONCURRENCY, async (entry) => {
+  // 2) Cataloguer (instantané) les pistes bouclées non encore en cache.
+  const todo = entries.filter((e) => e.loop && cache[keyFor(e)] === undefined);
+  await pool(todo, CONCURRENCY, async (entry) => {
     const key = keyFor(entry);
     try {
-      const res = await extractStems({
-        sourcePath, trackIndex: entry.trackIndex, id: entry.id,
-        loop: entry.loop, mediaDir: MEDIA_DIR, nsftool: NSFPLAY,
+      const res = await catalogStems({
+        sourcePath, trackIndex: entry.trackIndex, loop: entry.loop, nsftool: NSFPLAY,
       });
       cache[key] = res ?? null;
-      if (res) {
-        entry.channels = { sampleRate: res.sampleRate, voices: res.voices };
-        const active = res.voices.filter((v) => v.enabledByDefault).length;
-        process.stdout.write(`  ♪ stems ${entry.id} : ${res.voices.length} voix (${active} actives)\n`);
-      }
+      if (res) entry.channels = { sampleRate: res.sampleRate, voices: res.voices };
     } catch (err) {
-      process.stdout.write(`  ! stems KO ${entry.id} : ${err.message}\n`);
+      process.stdout.write(`  ! catalogue voix KO ${entry.id} : ${err.message}\n`);
       cache[key] = null;
     }
   });
@@ -288,7 +275,7 @@ async function catalogFile(fileName, caches) {
   });
 
   await detectLoops(fileName, fileStat, entries, caches.loops);
-  await extractAllStems(fileName, fileStat, entries, caches.stems);
+  await catalogAllStems(fileName, fileStat, entries, caches.stems);
   return entries;
 }
 
@@ -308,8 +295,7 @@ async function main() {
     return;
   }
 
-  console.log('[catalogue] détection de boucle NES (autocorrélation register-log nsftool)');
-  if (STEMS) console.log('[catalogue] extraction de stems ACTIVE (VDM_STEMS)');
+  console.log('[catalogue] boucles + voix NES via nsftool (auto, incrémental)');
   const caches = { loops: await loadLoopCache(CACHE_FILE), stems: await loadJson(STEMS_CACHE_FILE) };
 
   const allTracks = [];
@@ -322,9 +308,9 @@ async function main() {
   }
 
   await writeFile(MANIFEST, JSON.stringify({ tracks: allTracks }, null, 2));
-  // Détection toujours active -> on persiste toujours le cache de boucles.
+  // Détection + catalogue toujours actifs -> on persiste toujours les caches.
   await writeFile(CACHE_FILE, JSON.stringify(caches.loops, null, 1));
-  if (STEMS) await writeFile(STEMS_CACHE_FILE, JSON.stringify(caches.stems, null, 1));
+  await writeFile(STEMS_CACHE_FILE, JSON.stringify(caches.stems, null, 1));
   const looped = allTracks.filter((t) => t.loop).length;
   const stemmed = allTracks.filter((t) => t.channels).length;
   console.log(`[catalogue] terminé : ${allTracks.length} morceau(x), ${looped} boucle(s), ${stemmed} avec stems → ${MANIFEST}`);

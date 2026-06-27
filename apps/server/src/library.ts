@@ -33,7 +33,7 @@ interface MetaTrack {
     lengthSamples: number;
     sampleRate: number;
   };
-  /** Stems par voix (tools/nsf-stems.mjs) pour une piste NES. */
+  /** Voix (stems) cataloguées (tools/nsf-stems.mjs) pour une piste NES. */
   channels?: {
     sampleRate: number;
     voices: {
@@ -41,7 +41,7 @@ interface MetaTrack {
       label: string;
       chip?: string;
       kind?: string;
-      file: string;
+      channelIndex: number;
       enabledByDefault?: boolean;
     }[];
   };
@@ -67,6 +67,15 @@ export interface LoopRenderRef {
   loopLengthSamples: number;
 }
 
+/** Référence permettant de rendre un stem (une voix) à la demande. */
+export interface ChannelRenderRef {
+  sourcePath: string;
+  trackIndex: number;
+  channelIndex: number;
+  introSamples: number;
+  loopLengthSamples: number;
+}
+
 export interface ScanResult {
   library: Library;
   /** id -> chemin absolu, pour les morceaux à servir statiquement. */
@@ -75,8 +84,8 @@ export interface ScanResult {
   renders: Map<string, RenderRef>;
   /** id -> référence de rendu de boucle, pour les pistes émulées bouclées. */
   loops: Map<string, LoopRenderRef>;
-  /** `${id}::${chanId}` -> chemin absolu du stem, pour les pistes à canaux. */
-  channelFiles: Map<string, string>;
+  /** `${id}::${chanId}` -> référence de rendu d'un stem (rendu à la demande). */
+  channelRenders: Map<string, ChannelRenderRef>;
 }
 
 function slugify(value: string): string {
@@ -112,12 +121,12 @@ export async function scanLibrary(mediaDir: string, libraryDir: string): Promise
   const files = new Map<string, string>();
   const renders = new Map<string, RenderRef>();
   const loops = new Map<string, LoopRenderRef>();
-  const channelFiles = new Map<string, string>();
+  const channelRenders = new Map<string, ChannelRenderRef>();
 
   for (const entry of entries) {
     const isEmulated = entry.source != null && entry.trackIndex != null;
     const track = isEmulated
-      ? await buildEmulated(entry, libraryDir, mediaDir, renders, loops, channelFiles)
+      ? await buildEmulated(entry, libraryDir, mediaDir, renders, loops, channelRenders)
       : await buildStatic(entry, mediaDir, files);
     if (track) tracks.push(track);
   }
@@ -131,7 +140,7 @@ export async function scanLibrary(mediaDir: string, libraryDir: string): Promise
   }
   const games: GameGroup[] = [...byGame.entries()].map(([game, list]) => ({ game, tracks: list }));
 
-  return { library: { games }, files, renders, loops, channelFiles };
+  return { library: { games }, files, renders, loops, channelRenders };
 }
 
 /** Morceau émulé : rendu à la demande, durée/fondu par défaut depuis la source. */
@@ -141,7 +150,7 @@ async function buildEmulated(
   mediaDir: string,
   renders: Map<string, RenderRef>,
   loops: Map<string, LoopRenderRef>,
-  channelFiles: Map<string, string>
+  channelRenders: Map<string, ChannelRenderRef>
 ): Promise<Track | null> {
   const sourcePath = join(libraryDir, entry.source!);
   try {
@@ -185,17 +194,19 @@ async function buildEmulated(
     });
   }
 
-  // Stems par voix : mode le plus riche (précédence channels > loop > render).
-  if (entry.channels?.voices?.length) {
+  // Voix (stems) : mode le plus riche (précédence channels > loop > render).
+  // Rendu de chaque voix À LA DEMANDE -> on n'enregistre qu'une référence ; les
+  // bornes viennent de la boucle (les voix n'existent que si entry.loop).
+  if (entry.loop && entry.channels?.voices?.length) {
     const voices: ChannelInfo[] = [];
     for (const v of entry.channels.voices) {
-      const stemPath = join(mediaDir, v.file);
-      try {
-        await stat(stemPath);
-      } catch {
-        continue; // stem manquant -> on l'omet (le set reste cohérent)
-      }
-      channelFiles.set(`${id}::${v.id}`, stemPath);
+      channelRenders.set(`${id}::${v.id}`, {
+        sourcePath,
+        trackIndex: entry.trackIndex!,
+        channelIndex: v.channelIndex,
+        introSamples: entry.loop.startSamples,
+        loopLengthSamples: entry.loop.lengthSamples,
+      });
       voices.push({
         id: v.id,
         label: v.label,

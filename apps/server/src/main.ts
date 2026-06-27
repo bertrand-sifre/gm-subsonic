@@ -1,13 +1,13 @@
 import { spawn } from 'node:child_process';
 import { createReadStream } from 'node:fs';
-import { mkdir, stat } from 'node:fs/promises';
+import { mkdir, rm, stat } from 'node:fs/promises';
 import { dirname, extname, join } from 'node:path';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
-import { scanLibrary, type LoopRenderRef, type RenderRef, type ScanResult } from './library.js';
+import { scanLibrary, type ChannelRenderRef, type LoopRenderRef, type RenderRef, type ScanResult } from './library.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // apps/server/src -> racine du dépôt
@@ -20,6 +20,8 @@ const PORT = Number(process.env.PORT ?? 8787);
 // Garde-fous du rendu paramétrable.
 const MAX_SECONDS = 900;
 const MAX_FADE = 30;
+
+const NSFTOOL = process.env.VDM_NSFPLAY ?? 'nsftool';
 
 const CONTENT_TYPES: Record<string, string> = {
   '.wav': 'audio/wav',
@@ -77,11 +79,18 @@ app.get('/api/stream/:id', async (c) => {
   return c.notFound();
 });
 
-/** Streaming d'un stem isolé (une voix). 404 -> le client retombe sur le mix. */
+/** Streaming d'un stem (une voix), rendu à la demande. 404 -> repli sur le mix. */
 app.get('/api/stream/:id/channel/:chan', async (c) => {
-  const path = scan.channelFiles.get(`${c.req.param('id')}::${c.req.param('chan')}`);
-  if (!path) return c.notFound();
-  return serveFile(c, path);
+  const id = c.req.param('id');
+  const chan = c.req.param('chan');
+  const ref = scan.channelRenders.get(`${id}::${chan}`);
+  if (!ref) return c.notFound();
+  try {
+    return serveFile(c, await ensureChannelRendered(id, chan, ref));
+  } catch (err) {
+    console.error(`[vdm] rendu canal échoué (${id}/${chan}) :`, err);
+    return c.text('render failed', 500);
+  }
 });
 
 function numParam(c: Context, name: string, fallback: number): number {
@@ -182,6 +191,61 @@ function renderLoop(ref: LoopRenderRef, outPath: string): Promise<void> {
     '-metadata', `LOOPLENGTH=${ref.loopLengthSamples}`,
     '-c:a', 'libvorbis', '-qscale:a', '5', outPath,
   ]);
+}
+
+// ---- Rendu d'un stem (une voix) à la demande via nsftool -------------------
+
+function runCmd(cmd: string, args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('error', reject);
+    child.on('close', (code) =>
+      code === 0 ? resolve() : reject(new Error(`${cmd} (code ${code}) : ${stderr.trim()}`))
+    );
+  });
+}
+
+/** Garantit le stem d'une voix en cache (clé stable par piste+canal). */
+async function ensureChannelRendered(id: string, chan: string, ref: ChannelRenderRef): Promise<string> {
+  const outPath = join(CACHE_DIR, `${id}__ch_${chan}.ogg`);
+  const existing = await stat(outPath).catch(() => null);
+  if (existing && existing.size > 0) return outPath;
+
+  let pending = inflight.get(outPath);
+  if (!pending) {
+    pending = renderChannelStem(ref, outPath).finally(() => inflight.delete(outPath));
+    inflight.set(outPath, pending);
+  }
+  await pending;
+  return outPath;
+}
+
+/**
+ * Rend une voix isolée (nsftool --solo) sur les MÊMES bornes que l'artefact de
+ * boucle -> WAV, puis encode en OGG taggé LOOPSTART/LOOPLENGTH. Toutes les voix
+ * d'une piste ont donc la même longueur -> alignées à l'échantillon.
+ */
+async function renderChannelStem(ref: ChannelRenderRef, outPath: string): Promise<void> {
+  const endSample = ref.introSamples + ref.loopLengthSamples + LOOP_EPSILON_SAMPLES;
+  const lengthMs = Math.round((endSample / 44100) * 1000);
+  const wav = `${outPath}.tmp.wav`;
+  try {
+    await runCmd(NSFTOOL, [
+      '-t', String(ref.trackIndex + 1), '-l', String(lengthMs), '-r', '44100', '-c', '1',
+      '--solo', String(ref.channelIndex), '-o', wav, ref.sourcePath,
+    ]);
+    await runCmd('ffmpeg', [
+      '-hide_banner', '-loglevel', 'error', '-y', '-i', wav,
+      '-c:a', 'libvorbis', '-qscale:a', '4',
+      '-metadata', `LOOPSTART=${ref.introSamples}`,
+      '-metadata', `LOOPLENGTH=${ref.loopLengthSamples}`,
+      outPath,
+    ]);
+  } finally {
+    await rm(wav, { force: true }).catch(() => {});
+  }
 }
 
 // ---- Service de fichier avec Range (RFC 7233) ------------------------------
