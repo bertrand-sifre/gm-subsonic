@@ -296,6 +296,8 @@
           {/if}
           {#if current.loop}
             <span class="chip">🔁 boucle détectée</span>
+          {:else if current.channels}
+            <span class="chip muted">piste finie (jouée une fois)</span>
           {:else if current.render}
             <span class="chip muted">lecture paramétrable (pas de boucle)</span>
           {/if}
@@ -374,8 +376,10 @@
           <input type="number" min="0.5" max="20" step="0.5" bind:value={fadeSeconds} />
         </label>
       {/if}
-    {:else if current?.render}
-      <!-- Format émulé sans boucle : durée + fondu (rendu serveur). -->
+    {:else if current?.render && !current?.channels}
+      <!-- Format émulé sans boucle NI stems : durée + fondu (rendu serveur).
+           Avec stems, la lecture suit les voix (durée mesurée, jouée une fois) :
+           les paramètres durée/fondu seraient inertes -> on ne les affiche pas. -->
       <label>
         Durée (s)
         <input type="number" min="1" max="900" bind:value={renderSeconds} />

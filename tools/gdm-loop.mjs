@@ -29,10 +29,18 @@
  *     sans écriture. Les frames d'INIT (avant la 1re PLAY) ne sont PAS loggées.
  *
  * Export : detectLoop({ sourcePath, trackIndex, gdm })
- *   -> { startSeconds, lengthSeconds, startSamples, lengthSamples, sampleRate } | null
- * (mêmes champs que nsf-loop.detectLoop -> contrat MetaTrack.loop / @vdm/shared
- *  intact ; null = non bouclée / non convergente / gdm indisponible -> repli
- *  paramétrique côté serveur.)
+ *   -> { loop, naturalLengthSeconds }
+ *      - loop : { startSeconds, lengthSeconds, startSamples, lengthSamples,
+ *        sampleRate, frameRate } | null (mêmes champs que nsf-loop.detectLoop ->
+ *        contrat MetaTrack.loop / @vdm/shared intact ; null = non bouclée / non
+ *        convergente / gdm indisponible -> repli paramétrique côté serveur).
+ *      - naturalLengthSeconds : DURÉE RÉELLE d'une piste FINIE (non-bouclante) en
+ *        secondes, ou null. Le GBS n'expose AUCUNE durée native (ffprobe ->
+ *        FALLBACK générique) ; on la déduit donc de l'instant de la DERNIÈRE
+ *        écriture APU du log (les drivers GBS terminent un morceau par une frame
+ *        de SILENCE — volumes à 0, DAC wave coupé — qui EST la dernière écriture,
+ *        donc pas de queue à ajouter). null si la piste écrit encore en fin de
+ *        fenêtre (bouclante/longue) -> on garde le FALLBACK côté importeur.
  *
  * Usage CLI :  node tools/gdm-loop.mjs <source.gbs> <trackIndex>
  */
@@ -78,8 +86,10 @@ function run(cmd, args, timeoutMs) {
  *            écritures ; capte la NOTE TENUE (invisible au delta), sert au raffinement
  *            seamless du loopStart.
  * Le compteur `frames=N` de l'en-tête lève l'ambiguïté du newline final de split.
+ * On note aussi `lastWriteFrame` : l'index de la DERNIÈRE frame ayant des
+ * écritures (ligne non vide), d'où la durée naturelle d'une piste finie.
  *
- * @returns {{ delta: Int32Array, full: Int32Array, fps: number } | null}
+ * @returns {{ delta: Int32Array, full: Int32Array, fps: number, lastWriteFrame: number } | null}
  */
 function parseRegLog(stdout) {
   const lines = stdout.split('\n');
@@ -94,8 +104,10 @@ function parseRegLog(stdout) {
   const delta = new Int32Array(N);
   const full = new Int32Array(N);
   const reg = new Uint8Array(48); // état courant des 48 registres APU (FF10..FF3F)
+  let lastWriteFrame = -1; // dernière frame avec écriture (fin musicale d'une piste finie)
   for (let f = 0; f < N; f++) {
     const line = lines[1 + f] ?? ''; // frame sans écriture -> ligne vide
+    if (line.length > 0) lastWriteFrame = f;
     let dId = dIds.get(line);
     if (dId === undefined) { dId = dIds.size; dIds.set(line, dId); }
     delta[f] = dId;
@@ -109,7 +121,7 @@ function parseRegLog(stdout) {
     if (sId === undefined) { sId = sIds.size; sIds.set(key, sId); }
     full[f] = sId;
   }
-  return { delta, full, fps };
+  return { delta, full, fps, lastWriteFrame };
 }
 
 /**
@@ -128,7 +140,7 @@ function parseRegLog(stdout) {
  * @param {string} o.sourcePath  chemin de la source GBS
  * @param {number} o.trackIndex  index de sous-piste 0-based (gdm/gme_start_track)
  * @param {string} [o.gdm]       binaire gdm (défaut 'gdm')
- * @returns {{ startSeconds, lengthSeconds, startSamples, lengthSamples, sampleRate } | null}
+ * @returns {{ loop: object|null, naturalLengthSeconds: number|null }}
  */
 export async function detectLoop({ sourcePath, trackIndex, gdm = 'gdm' }) {
   const r = await run(
@@ -139,11 +151,12 @@ export async function detectLoop({ sourcePath, trackIndex, gdm = 'gdm' }) {
       '--rate', String(RATE)],
     SPAWN_TIMEOUT_MS
   );
-  if (r.code !== 0) return null; // gdm indispo / échec / timeout / libgme non patchée -> repli
+  // gdm indispo / échec / timeout / libgme non patchée -> repli paramétrique propre.
+  if (r.code !== 0) return { loop: null, naturalLengthSeconds: null };
 
   const parsed = parseRegLog(r.stdout);
-  if (!parsed) return null; // en-tête absente / fps ou frames invalides -> repli
-  const { delta, full, fps } = parsed;
+  if (!parsed) return { loop: null, naturalLengthSeconds: null }; // en-tête absente / invalide
+  const { delta, full, fps, lastWriteFrame } = parsed;
 
   // Période + loopStart sur le delta (parité nsf-loop), en IGNORANT l'artefact d'init
   // de la frame 0 (sinon fausse intro d'1 frame sur les pistes qui bouclent dès 0) et
@@ -151,17 +164,26 @@ export async function detectLoop({ sourcePath, trackIndex, gdm = 'gdm' }) {
   // (sinon la note tenue à la frontière vient de l'intro).
   const loop = analyzeStates(delta, fps, { ignoreFirstFrameMismatch: true, refineStates: full });
 
+  // Durée naturelle d'une piste FINIE : l'instant de la dernière écriture APU. On
+  // ne la retient QUE si la piste a cessé d'écrire BIEN avant la fin de fenêtre
+  // (garde de 2 s) : sinon elle boucle/continue encore -> pas de fin franche, on
+  // laisse le FALLBACK. Inutile quand une boucle est trouvée (durée = loopEnd),
+  // mais émise quand même : c'est l'importeur qui choisit selon `loop`.
+  const tailGuardFrames = Math.round(2 * fps);
+  const finite = !loop && lastWriteFrame >= 0 && lastWriteFrame < delta.length - tailGuardFrames;
+  const naturalLengthSeconds = finite ? +(((lastWriteFrame + 1) / fps).toFixed(4)) : null;
+
   if (process.env.VDM_GBS_LOOP_DEBUG) {
     process.stderr.write(
       `[gdm-loop] method=register-log fps=${fps.toFixed(4)} frames=${delta.length} ` +
       `loop=${loop
         ? `start=${loop.startSeconds}s length=${loop.lengthSeconds}s ` +
           `samples[start=${loop.startSamples} len=${loop.lengthSamples}]`
-        : 'aucune'}\n`
+        : 'aucune'} naturalLength=${naturalLengthSeconds ?? 'n/a'}s\n`
     );
   }
 
-  return loop;
+  return { loop, naturalLengthSeconds };
 }
 
 // ---- CLI de test ----------------------------------------------------------

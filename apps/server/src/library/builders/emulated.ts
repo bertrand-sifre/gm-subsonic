@@ -60,18 +60,32 @@ async function buildEmulated(entry: MetaTrack, ctx: BuildContext): Promise<Track
   }
 
   // Voix (stems) : mode le plus riche. Rendu de chaque voix À LA DEMANDE -> on
-  // n'enregistre qu'une référence (avec channelIndex) ; les bornes viennent de
-  // la boucle (les voix n'existent que si entry.loop).
-  if (entry.loop && entry.channels?.voices?.length) {
+  // n'enregistre qu'une référence (avec channelIndex). Les voix d'une puce sont
+  // STATIQUES (indépendantes de la boucle) : on les expose AUSSI sur les pistes
+  // FINIES (sans boucle). Les bornes du rendu suivent le mode de lecture :
+  //  - boucle détectée  -> raccord seamless (intro + corps bouclable) ;
+  //  - piste finie       -> rendu paramétrique borné à la durée (joué une fois).
+  if (entry.channels?.voices?.length) {
     const voices: ChannelInfo[] = [];
     for (const v of entry.channels.voices) {
-      ctx.channelRenders.set(`${id}::${v.id}`, {
-        sourcePath,
-        trackIndex: entry.trackIndex!,
-        introSamples: entry.loop.startSamples,
-        loopLengthSamples: entry.loop.lengthSamples,
-        channelIndex: v.channelIndex,
-      });
+      ctx.channelRenders.set(
+        `${id}::${v.id}`,
+        entry.loop
+          ? {
+              sourcePath,
+              trackIndex: entry.trackIndex!,
+              introSamples: entry.loop.startSamples,
+              loopLengthSamples: entry.loop.lengthSamples,
+              channelIndex: v.channelIndex,
+            }
+          : {
+              sourcePath,
+              trackIndex: entry.trackIndex!,
+              channelIndex: v.channelIndex,
+              seconds: defaultSeconds,
+              fade: defaultFade,
+            }
+      );
       voices.push({
         id: v.id,
         label: v.label,

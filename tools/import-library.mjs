@@ -52,10 +52,15 @@ const STEMS_CACHE_FILE = join(MEDIA_DIR, 'stems.cache.json');
 // dont l'état complet des registres coïncide une période plus loin -> raccord propre).
 // Schéma 5 : la boucle détectée porte désormais `frameRate` (repère « frame » du
 // lecteur) ; on re-détecte pour le renseigner dans le manifeste.
+// Schéma 6 : la valeur GBS sous une clé `fichier#piste@…` n'est plus l'objet boucle
+// brut mais `{ loop, naturalLengthSeconds }` (gdm-loop expose désormais la DURÉE
+// RÉELLE des pistes finies/non-bouclantes, déduite de la dernière écriture APU —
+// le GBS n'a pas de durée native). Le NES garde sa valeur `loop|null` (clés
+// distinctes par extension). Le bump force une re-détection propre.
 // Les valeurs sous les MÊMES clés `fichier#piste@mtime:size` ne sont plus comparables ;
 // le bump force une re-détection propre (le NES est re-détecté une fois à l'identique,
 // déterministe -> sans risque). Un cache de schéma inférieur est traité comme vide.
-const LOOP_CACHE_SCHEMA = 5;
+const LOOP_CACHE_SCHEMA = 6;
 
 const FALLBACK_SECONDS = Number(process.env.VDM_FALLBACK_SECONDS ?? 120);
 const CONCURRENCY = 6;
@@ -275,6 +280,12 @@ async function catalogAllStems(fileName, fileStat, entries, cache) {
  * ⚠ Coût : GBS n'a pas de durée native (probeTrack -> FALLBACK_SECONDS pour CHAQUE
  * sous-piste), donc le garde-jingle `defaultSeconds >= DETECT_MIN_SECONDS` est
  * INERTE -> O(trackCount) émulations au 1er import froid. Borné par DETECT_CONCURRENCY.
+ *
+ * Double rôle (schéma 6) : le même log de registres donne AUSSI la DURÉE RÉELLE
+ * d'une piste FINIE (non-bouclante) — instant de la dernière écriture APU. Le GBS
+ * n'ayant pas de durée native, on l'applique à `defaultSeconds` (sinon FALLBACK
+ * 120 s = la fausse durée « 2:00 » observée), avec `defaultFade = 0` : ces pistes
+ * se TERMINENT d'elles-mêmes (frame de silence du driver), pas besoin de fondu.
  */
 async function detectGbsLoops(fileName, fileStat, entries, cache) {
   if (extname(fileName).toLowerCase() !== '.gbs' || !GBS_LOOP_ENABLED) return;
@@ -282,11 +293,19 @@ async function detectGbsLoops(fileName, fileStat, entries, cache) {
   const sourcePath = join(LIBRARY_DIR, fileName);
   const keyFor = (e) => `${fileName}#${e.trackIndex}@${fileStat.mtimeMs}:${fileStat.size}`;
 
-  // 1) Réappliquer les boucles connues (persistance).
-  for (const e of entries) {
-    const cached = cache[keyFor(e)];
-    if (cached) e.loop = cached;
-  }
+  // Applique un résultat { loop, naturalLengthSeconds } à une entrée : la boucle
+  // prime ; à défaut, la durée réelle mesurée recale defaultSeconds (+ fade 0).
+  const apply = (entry, res) => {
+    if (res?.loop) {
+      entry.loop = res.loop;
+    } else if (res?.naturalLengthSeconds != null) {
+      entry.defaultSeconds = Math.max(1, Math.round(res.naturalLengthSeconds));
+      entry.defaultFade = 0; // piste finie : se tait toute seule, pas de fondu
+    }
+  };
+
+  // 1) Réappliquer les résultats connus (persistance).
+  for (const e of entries) apply(e, cache[keyFor(e)]);
 
   // 2) Détection neuve (cache miss). DETECT_ONLY = filtre dev ; jingles écartés.
   if (DETECT_ONLY && !fileName.includes(DETECT_ONLY)) return;
@@ -297,47 +316,46 @@ async function detectGbsLoops(fileName, fileStat, entries, cache) {
   await pool(todo, DETECT_CONCURRENCY, async (entry) => {
     const key = keyFor(entry);
     try {
-      const loop = await detectGbsLoop({
-        sourcePath,
-        trackIndex: entry.trackIndex,
-        gdm: GDM,
-      });
-      cache[key] = loop ?? null;
-      if (loop) {
-        entry.loop = loop;
+      const res = await detectGbsLoop({ sourcePath, trackIndex: entry.trackIndex, gdm: GDM });
+      cache[key] = res; // { loop, naturalLengthSeconds } (gdm indispo -> les deux null)
+      apply(entry, res);
+      if (res.loop) {
         process.stdout.write(
-          `  ⟳ boucle ${entry.id} : ${loop.lengthSeconds}s (intro ${loop.startSeconds}s)\n`
+          `  ⟳ boucle ${entry.id} : ${res.loop.lengthSeconds}s (intro ${res.loop.startSeconds}s)\n`
         );
+      } else if (res.naturalLengthSeconds != null) {
+        process.stdout.write(`  ⤓ durée ${entry.id} : ${entry.defaultSeconds}s (piste finie, sans boucle)\n`);
       }
     } catch (err) {
       process.stdout.write(`  ! détection KO ${entry.id} : ${err.message}\n`);
-      cache[key] = null;
+      cache[key] = { loop: null, naturalLengthSeconds: null };
     }
   });
 }
 
 /**
- * Catalogue les voix (stems) des pistes GBS qui bouclent. Branche SŒUR de
- * catalogAllStems, gardée par `.gbs`. Les voix du DMG-APU sont STATIQUES (4
- * oscillateurs, indépendants de la piste) : on appelle donc `gdm probe` UNE SEULE
- * fois par FICHIER (≠ NES, une lecture de puce par piste), puis on applique le
- * résultat à chaque piste bouclée. Inerte si aucune piste n'a de boucle (donc
- * inerte si la détection est désactivée par VDM_GBS_LOOP=0).
+ * Catalogue les voix (stems) des pistes GBS. Branche SŒUR de catalogAllStems,
+ * gardée par `.gbs`. Les voix du DMG-APU sont STATIQUES (4 oscillateurs,
+ * indépendants de la piste) : on appelle donc `gdm probe` UNE SEULE fois par
+ * FICHIER (≠ NES, une lecture de puce par piste), puis on applique le résultat à
+ * CHAQUE piste — bouclante OU NON. (Les voix existent indépendamment de la boucle :
+ * une piste finie a aussi ses 4 canaux ; le serveur les rend alors en mode
+ * paramétrique borné — cf. emulatedBuilder.) Inerte si gdm est indisponible.
  */
 async function catalogGbsAllStems(fileName, fileStat, entries, cache) {
   if (extname(fileName).toLowerCase() !== '.gbs') return;
   const sourcePath = join(LIBRARY_DIR, fileName);
   const keyFor = (e) => `${fileName}#${e.trackIndex}@${fileStat.mtimeMs}:${fileStat.size}`;
 
-  // 1) Réappliquer le cache (persistance) — seulement si la piste a une boucle.
+  // 1) Réappliquer le cache (persistance) — pour toute piste, boucle ou non.
   for (const e of entries) {
     const cached = cache[keyFor(e)];
-    if (cached && e.loop) e.channels = { sampleRate: cached.sampleRate, voices: cached.voices };
+    if (cached) e.channels = { sampleRate: cached.sampleRate, voices: cached.voices };
   }
 
-  // 2) Cataloguer (instantané) les pistes bouclées non encore en cache. Un SEUL
-  // probe par fichier (voix statiques) -> réutilisé pour toutes ces pistes.
-  const todo = entries.filter((e) => e.loop && cache[keyFor(e)] === undefined);
+  // 2) Cataloguer (instantané) les pistes non encore en cache. Un SEUL probe par
+  // fichier (voix statiques) -> réutilisé pour toutes ces pistes.
+  const todo = entries.filter((e) => cache[keyFor(e)] === undefined);
   if (todo.length === 0) return;
 
   let res = null;

@@ -72,3 +72,23 @@ export function encodeSeamlessOgg(
   );
   return exec('ffmpeg', args);
 }
+
+/**
+ * Encode un WAV en OGG SIMPLE (pas de boucle), avec fondu de sortie optionnel.
+ * Sert aux stems d'une piste FINIE (non-bouclante) : le lecteur les joue UNE FOIS,
+ * sans tags de boucle. `fade <= 0` -> simple ré-encodage (les pistes GBS finies se
+ * taisent d'elles-mêmes, donc fade = 0 par défaut côté builder).
+ */
+export function encodePlainOgg(
+  wav: string,
+  outPath: string,
+  fade: number,
+  seconds: number
+): Promise<void> {
+  const args = ['-hide_banner', '-loglevel', 'error', '-y', '-i', wav];
+  if (fade > 0) {
+    args.push('-af', `afade=t=out:st=${Math.max(0, seconds - fade)}:d=${fade}`);
+  }
+  args.push('-c:a', 'libvorbis', '-qscale:a', '4', outPath);
+  return exec('ffmpeg', args);
+}

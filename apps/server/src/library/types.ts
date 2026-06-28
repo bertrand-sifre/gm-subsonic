@@ -73,6 +73,23 @@ export interface SeamlessRenderRef {
   channelIndex?: number;
 }
 
+/**
+ * Référence d'un stem rendu PARAMÉTRIQUEMENT, pour une piste FINIE (sans boucle) :
+ * une voix isolée bornée à `seconds` (la durée réelle mesurée), jouée UNE FOIS par
+ * le lecteur. Distincte de `SeamlessRenderRef` (qui suppose des bornes de boucle) ;
+ * on les discrimine par la présence de `loopLengthSamples`.
+ */
+export interface ParametricChannelRef {
+  sourcePath: string;
+  trackIndex: number;
+  channelIndex: number;
+  seconds: number;
+  fade: number;
+}
+
+/** Référence de rendu d'un stem : SEAMLESS (piste bouclée) ou PARAMÉTRIQUE (finie). */
+export type ChannelRenderRef = SeamlessRenderRef | ParametricChannelRef;
+
 export interface ScanResult {
   library: Library;
   /** id -> chemin absolu, pour les morceaux à servir statiquement. */
@@ -82,7 +99,7 @@ export interface ScanResult {
   /** id -> référence de l'artefact de boucle, pour les pistes émulées bouclées. */
   loops: Map<string, SeamlessRenderRef>;
   /** `${id}::${chanId}` -> référence de rendu d'un stem (rendu à la demande). */
-  channelRenders: Map<string, SeamlessRenderRef>;
+  channelRenders: Map<string, ChannelRenderRef>;
 }
 
 /**
@@ -95,7 +112,7 @@ export interface BuildContext {
   files: Map<string, string>;
   renders: Map<string, RenderRef>;
   loops: Map<string, SeamlessRenderRef>;
-  channelRenders: Map<string, SeamlessRenderRef>;
+  channelRenders: Map<string, ChannelRenderRef>;
 }
 
 /**

@@ -49,9 +49,10 @@ export interface ChannelInfo {
 }
 
 /**
- * Ensemble de stems synchronisés d'un morceau. Tous partagent le même
- * sampleRate, la même longueur et la boucle de `Track.loop` → alignés à
- * l'échantillon (rendu déterministe par nsftool).
+ * Ensemble de stems synchronisés d'un morceau. Tous partagent le même sampleRate
+ * et la même longueur → alignés à l'échantillon (rendu déterministe). Si le
+ * morceau boucle, ils suivent `Track.loop` (raccord seamless) ; sinon (piste
+ * FINIE) ils sont rendus bornés à `Track.duration` et joués une fois.
  */
 export interface ChannelSet {
   sampleRate: number;

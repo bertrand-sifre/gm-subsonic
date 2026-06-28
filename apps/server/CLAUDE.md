@@ -26,14 +26,20 @@ API du serveur (Hono + @hono/node-server). Deux responsabilités pour le MVP :
 
 **Points d'extension** : un nouveau moteur audio (USF/SPC…) = un fichier dans `engines/`
 implémentant `PcmEngine` ; une nouvelle famille de source = un `TrackBuilder` dans
-`library/builders/`. Boucle et stems partagent `renderSeamless` ; le moteur est choisi par
-`pickSeamlessEngine(ref)` : source `.gbs` → gdm (mix **et** voix), sinon
-`SeamlessRenderRef.channelIndex` absent → mix libgme, présent → voix nsftool.
+`library/builders/`. Le moteur est choisi par `engineFor(sourcePath, channelIndex)` :
+source `.gbs` → gdm (mix **et** voix), sinon canal absent → mix libgme, présent → voix
+nsftool. Les stems suivent le mode de lecture : piste **bouclée** → `renderSeamless`
+(raccord crossfadé) ; piste **finie** (sans boucle) → `renderParametricChannel` (voix
+bornée à la durée + `encodePlainOgg`, jouée une fois). `channelRenders` porte donc une
+`ChannelRenderRef = SeamlessRenderRef | ParametricChannelRef`.
 La détection de boucle GBS (`tools/gdm-loop`, **log d'écritures de registres APU** via
 la sous-commande `gdm loop` d'une libgme patchée — même algorithme `analyzeStates` que
 le NES) est **activée par défaut** à l'import (désactivable via `VDM_GBS_LOOP=0`) ; le
 rejet des boucles non périodiques renvoie `null` plutôt qu'une fausse boucle, d'où repli
-paramétrique propre le cas échéant.
+paramétrique propre le cas échéant. Le même log donne la **durée réelle des pistes finies**
+(GBS sans durée native) : instant de la dernière écriture APU → `defaultSeconds` mesuré
+au lieu du FALLBACK 120 s. Les voix DMG-APU étant **statiques**, elles sont exposées sur
+**toutes** les pistes (bouclées ou finies), pas seulement celles qui bouclent.
 
 ## Endpoints
 

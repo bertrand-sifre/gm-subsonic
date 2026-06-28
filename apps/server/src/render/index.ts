@@ -3,32 +3,33 @@
  * dédoublonnées (cf. `cache.ts`) :
  *  - `ensureParametricRender` : durée + fondu choisis (moteur libgme) ;
  *  - `ensureLoopRender`       : artefact de boucle sans couture (mix, libgme) ;
- *  - `ensureChannelRender`    : stem d'une voix sans couture (solo, nsftool).
+ *  - `ensureChannelRender`    : stem d'une voix — SEAMLESS si la piste boucle,
+ *    PARAMÉTRIQUE (durée bornée, joué une fois) si la piste est finie.
  *
- * Les deux derniers passent par `renderSeamless`, qui ne diffère QUE par le
- * moteur PCM choisi selon `ref.channelIndex` — toute la chaîne ε → crossfade →
- * encode → tags est commune.
+ * Le moteur PCM est choisi par `engineFor(sourcePath, channelIndex)` : GBS → gdm
+ * (mix *et* voix), sinon voix isolée → nsftool (NES), mix → libgme.
  */
 
 import { rm } from 'node:fs/promises';
 import { extname, join } from 'node:path';
-import { CACHE_DIR } from '../config.js';
-import type { RenderRef, SeamlessRenderRef } from '../library/types.js';
+import { CACHE_DIR, SAMPLE_RATE } from '../config.js';
+import type { ChannelRenderRef, ParametricChannelRef, RenderRef, SeamlessRenderRef } from '../library/types.js';
 import { ensureCached } from './cache.js';
-import { encodeSeamlessOgg, LOOP_EPSILON_SAMPLES } from './encode.js';
+import { encodePlainOgg, encodeSeamlessOgg, LOOP_EPSILON_SAMPLES } from './encode.js';
 import { gdmEngine } from './engines/gdm.js';
 import { libgmeEngine, renderParametricOgg } from './engines/libgme.js';
 import { nsftoolEngine } from './engines/nsftool.js';
 import type { PcmEngine } from './engines/types.js';
 
 /**
- * Choix du moteur PCM seamless. GBS → gdm (libgme natif : MIX *et* voix isolée
- * via mute). Toute autre source garde EXACTEMENT le dispatch d'origine : voix
- * isolée → nsftool (NES), mix → libgme. Le chemin NSF n'est jamais modifié.
+ * Choix du moteur PCM selon la SOURCE et le mode (mix vs voix isolée). GBS → gdm
+ * (libgme natif : MIX *et* voix isolée via mute). Toute autre source garde
+ * EXACTEMENT le dispatch d'origine : voix isolée → nsftool (NES), mix → libgme.
+ * Le chemin NSF n'est jamais modifié.
  */
-function pickSeamlessEngine(ref: SeamlessRenderRef): PcmEngine {
-  if (extname(ref.sourcePath).toLowerCase() === '.gbs') return gdmEngine;
-  return ref.channelIndex != null ? nsftoolEngine : libgmeEngine;
+function engineFor(sourcePath: string, channelIndex?: number): PcmEngine {
+  if (extname(sourcePath).toLowerCase() === '.gbs') return gdmEngine;
+  return channelIndex != null ? nsftoolEngine : libgmeEngine;
 }
 
 /**
@@ -37,7 +38,7 @@ function pickSeamlessEngine(ref: SeamlessRenderRef): PcmEngine {
  * [intro + boucle + ε] en WAV, puis on encode l'OGG bouclable + tags de boucle.
  */
 async function renderSeamless(outPath: string, ref: SeamlessRenderRef): Promise<void> {
-  const engine = pickSeamlessEngine(ref);
+  const engine = engineFor(ref.sourcePath, ref.channelIndex);
   const endSample = ref.introSamples + ref.loopLengthSamples + LOOP_EPSILON_SAMPLES;
   const wav = `${outPath}.tmp.wav`;
   try {
@@ -48,6 +49,28 @@ async function renderSeamless(outPath: string, ref: SeamlessRenderRef): Promise<
       channelIndex: ref.channelIndex,
     });
     await encodeSeamlessOgg(wav, outPath, ref.introSamples, ref.loopLengthSamples);
+  } finally {
+    await rm(wav, { force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Rendu PARAMÉTRIQUE d'une voix isolée (piste FINIE, sans boucle) : on rend la
+ * voix bornée à `seconds` (durée réelle mesurée) puis on encode un OGG SIMPLE
+ * (fondu optionnel, pas de tags de boucle). Le lecteur la joue UNE FOIS.
+ */
+async function renderParametricChannel(outPath: string, ref: ParametricChannelRef): Promise<void> {
+  const engine = engineFor(ref.sourcePath, ref.channelIndex);
+  const endSample = Math.round(ref.seconds * SAMPLE_RATE);
+  const wav = `${outPath}.tmp.wav`;
+  try {
+    await engine.renderWav(wav, {
+      sourcePath: ref.sourcePath,
+      trackIndex: ref.trackIndex,
+      endSample,
+      channelIndex: ref.channelIndex,
+    });
+    await encodePlainOgg(wav, outPath, ref.fade, ref.seconds);
   } finally {
     await rm(wav, { force: true }).catch(() => {});
   }
@@ -79,7 +102,16 @@ export function ensureLoopRender(id: string, ref: SeamlessRenderRef): Promise<st
   return ensureCached(join(CACHE_DIR, `${id}__loop_${loopSig(ref)}.ogg`), (out) => renderSeamless(out, ref));
 }
 
-/** Garantit le stem d'une voix en cache (clé = id + canal + bornes de boucle). */
-export function ensureChannelRender(id: string, chan: string, ref: SeamlessRenderRef): Promise<string> {
-  return ensureCached(join(CACHE_DIR, `${id}__ch_${chan}__${loopSig(ref)}.ogg`), (out) => renderSeamless(out, ref));
+/**
+ * Garantit le stem d'une voix en cache. Deux modes selon le type de référence :
+ *  - SEAMLESS (piste bouclée) : clé = id + canal + bornes de boucle ;
+ *  - PARAMÉTRIQUE (piste finie) : clé = id + canal + durée + fondu.
+ * On discrimine par la présence des bornes de boucle (`loopLengthSamples`).
+ */
+export function ensureChannelRender(id: string, chan: string, ref: ChannelRenderRef): Promise<string> {
+  if ('loopLengthSamples' in ref) {
+    return ensureCached(join(CACHE_DIR, `${id}__ch_${chan}__${loopSig(ref)}.ogg`), (out) => renderSeamless(out, ref));
+  }
+  const sig = `s${ref.seconds}__f${String(ref.fade).replace('.', 'p')}__c${ref.channelIndex}`;
+  return ensureCached(join(CACHE_DIR, `${id}__ch_${chan}__${sig}.ogg`), (out) => renderParametricChannel(out, ref));
 }
