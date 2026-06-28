@@ -7,13 +7,15 @@
  * On NE décode PLUS l'audio ici : ces formats sont émulés et infinis, et le
  * rendu en OGG se fait À LA DEMANDE côté serveur. L'import lit les métadonnées
  * par sous-piste (nom via tag `song`, durée voulue via chunk `time`) et détecte
- * les POINTS DE BOUCLE des pistes NES (NSF/NSFe) par AUTOCORRÉLATION du log de
- * registres APU de nsftool (tools/nsf-loop.mjs) — déterministe, rate-indépendant.
+ * les POINTS DE BOUCLE par AUTOCORRÉLATION d'un LOG D'ÉCRITURES de registres :
+ * NES (NSF/NSFe) via nsftool (tools/nsf-loop.mjs), GBS (Game Boy) via la
+ * sous-commande `gdm loop` d'une libgme patchée (tools/gdm-loop.mjs) — même
+ * algorithme déterministe et rate-indépendant (analyzeStates partagé).
  *
  * La détection est AUTOMATIQUE et INCRÉMENTALE : un cache par mtime/size
  * (media/loops.cache.json, schéma versionné) évite de re-détecter à chaque boot ;
- * seul le 1er run froid d'une nouvelle piste coûte (~0.5-1 s à r=8000). Les
- * formats non-NES (SPC/VGM/GBS…) ne sont pas détectés -> repli paramétrique.
+ * seul le 1er run froid d'une nouvelle piste coûte (~0.5-1 s à r=8000). Les autres
+ * formats émulés (SPC/VGM…) ne sont pas détectés -> repli paramétrique.
  *
  * Sortie : media/library.generated.json (manifeste lu par le serveur).
  *
@@ -31,6 +33,8 @@ import { dirname, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { detectLoop } from './nsf-loop.mjs';
 import { catalogStems } from './nsf-stems.mjs';
+import { detectLoop as detectGbsLoop } from './gdm-loop.mjs';
+import { catalogStems as catalogGbsStems } from './gdm-probe.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -40,11 +44,14 @@ const MANIFEST = join(MEDIA_DIR, 'library.generated.json');
 const CACHE_FILE = join(MEDIA_DIR, 'loops.cache.json');
 const STEMS_CACHE_FILE = join(MEDIA_DIR, 'stems.cache.json');
 
-// Schéma du cache de boucles. Le détecteur a changé (autocorrélation register-log
-// nsftool, plus l'ancienne heuristique audio NCC) : les valeurs sous les MÊMES
-// clés `fichier#piste@mtime:size` ne sont plus comparables. Un cache de schéma
-// inférieur est traité comme vide (re-détection propre).
-const LOOP_CACHE_SCHEMA = 2;
+// Schéma du cache de boucles. Schéma 3 : le détecteur GBS est passé de l'ancienne
+// heuristique PCM (autocorrélation d'enveloppe RMS/NCC, coarse->fine) au LOG
+// D'ÉCRITURES de registres APU (sous-commande `gdm loop`, parité nsf-loop) ; les
+// valeurs sous les MÊMES clés `fichier#piste@mtime:size` ne sont plus comparables.
+// Le bump force une re-détection propre (le NES est re-détecté une fois à
+// l'identique, déterministe -> sans risque). Un cache de schéma inférieur est
+// traité comme vide.
+const LOOP_CACHE_SCHEMA = 3;
 
 const FALLBACK_SECONDS = Number(process.env.VDM_FALLBACK_SECONDS ?? 120);
 const CONCURRENCY = 6;
@@ -56,6 +63,16 @@ const DETECT_ONLY = process.env.VDM_DETECT_ONLY ?? '';
 const DETECT_CONCURRENCY = 4; // nsftool CPU-bound mais rapide à r=8000
 
 const NSFPLAY = process.env.VDM_NSFPLAY ?? 'nsftool';
+const GDM = process.env.VDM_GDM ?? 'gdm';
+
+// Détection de boucle GBS (gdm-loop, LOG D'ÉCRITURES de registres APU) : ACTIVÉE
+// PAR DÉFAUT. Même algorithme EXACT que le NES (égalité entière de frames, pas une
+// similarité approchée) via la sous-commande `gdm loop` d'une libgme patchée ; le
+// rejet des boucles non périodiques/triviales renvoie null plutôt qu'une fausse
+// boucle, d'où repli paramétrique propre. Désactivable via VDM_GBS_LOOP=0. Le
+// catalogue de voix ne s'active que sur les pistes ayant déjà une boucle -> inerte
+// si la détection est désactivée.
+const GBS_LOOP_ENABLED = process.env.VDM_GBS_LOOP !== '0';
 
 /** Formats émulés/séquencés gérés par le demuxer libgme de ffmpeg. */
 const VGM_EXT = new Set([
@@ -146,8 +163,8 @@ async function loadJson(path) {
 
 /**
  * Charge le cache de boucles en validant son schéma. Un cache de schéma inférieur
- * (anciennes valeurs audio NCC sous les mêmes clés) est traité comme VIDE pour
- * forcer une re-détection propre. `__schema` est toujours (ré)injecté : il ne
+ * (valeurs d'une méthode de détection antérieure sous les mêmes clés) est traité
+ * comme VIDE pour forcer une re-détection propre. `__schema` est toujours (ré)injecté : il ne
  * collisionne jamais avec une clé `fichier#piste@mtime:size` et n'est jamais lu
  * comme une entrée de boucle.
  */
@@ -243,6 +260,95 @@ async function catalogAllStems(fileName, fileStat, entries, cache) {
   });
 }
 
+/**
+ * Boucles des pistes GBS (Game Boy) via gdm-loop (AUTOCORRÉLATION d'un LOG
+ * D'ÉCRITURES de registres APU, parité nsf-loop). Branche SŒUR de detectLoops,
+ * gardée par l'extension `.gbs` (activée par défaut ; désactivable via VDM_GBS_LOOP=0).
+ * Réutilise le cache caches.loops (clés `fichier#piste@mtime:size`, distinctes des
+ * NSF) ; gdm-loop renvoie déjà les noms de champs finaux (MetaTrack.loop), null si
+ * non périodique -> repli paramétrique propre (jamais de fausse boucle).
+ *
+ * ⚠ Coût : GBS n'a pas de durée native (probeTrack -> FALLBACK_SECONDS pour CHAQUE
+ * sous-piste), donc le garde-jingle `defaultSeconds >= DETECT_MIN_SECONDS` est
+ * INERTE -> O(trackCount) émulations au 1er import froid. Borné par DETECT_CONCURRENCY.
+ */
+async function detectGbsLoops(fileName, fileStat, entries, cache) {
+  if (extname(fileName).toLowerCase() !== '.gbs' || !GBS_LOOP_ENABLED) return;
+
+  const sourcePath = join(LIBRARY_DIR, fileName);
+  const keyFor = (e) => `${fileName}#${e.trackIndex}@${fileStat.mtimeMs}:${fileStat.size}`;
+
+  // 1) Réappliquer les boucles connues (persistance).
+  for (const e of entries) {
+    const cached = cache[keyFor(e)];
+    if (cached) e.loop = cached;
+  }
+
+  // 2) Détection neuve (cache miss). DETECT_ONLY = filtre dev ; jingles écartés.
+  if (DETECT_ONLY && !fileName.includes(DETECT_ONLY)) return;
+  const todo = entries.filter(
+    (e) => e.defaultSeconds >= DETECT_MIN_SECONDS && cache[keyFor(e)] === undefined
+  );
+
+  await pool(todo, DETECT_CONCURRENCY, async (entry) => {
+    const key = keyFor(entry);
+    try {
+      const loop = await detectGbsLoop({
+        sourcePath,
+        trackIndex: entry.trackIndex,
+        gdm: GDM,
+      });
+      cache[key] = loop ?? null;
+      if (loop) {
+        entry.loop = loop;
+        process.stdout.write(
+          `  ⟳ boucle ${entry.id} : ${loop.lengthSeconds}s (intro ${loop.startSeconds}s)\n`
+        );
+      }
+    } catch (err) {
+      process.stdout.write(`  ! détection KO ${entry.id} : ${err.message}\n`);
+      cache[key] = null;
+    }
+  });
+}
+
+/**
+ * Catalogue les voix (stems) des pistes GBS qui bouclent. Branche SŒUR de
+ * catalogAllStems, gardée par `.gbs`. Les voix du DMG-APU sont STATIQUES (4
+ * oscillateurs, indépendants de la piste) : on appelle donc `gdm probe` UNE SEULE
+ * fois par FICHIER (≠ NES, une lecture de puce par piste), puis on applique le
+ * résultat à chaque piste bouclée. Inerte si aucune piste n'a de boucle (donc
+ * inerte si la détection est désactivée par VDM_GBS_LOOP=0).
+ */
+async function catalogGbsAllStems(fileName, fileStat, entries, cache) {
+  if (extname(fileName).toLowerCase() !== '.gbs') return;
+  const sourcePath = join(LIBRARY_DIR, fileName);
+  const keyFor = (e) => `${fileName}#${e.trackIndex}@${fileStat.mtimeMs}:${fileStat.size}`;
+
+  // 1) Réappliquer le cache (persistance) — seulement si la piste a une boucle.
+  for (const e of entries) {
+    const cached = cache[keyFor(e)];
+    if (cached && e.loop) e.channels = { sampleRate: cached.sampleRate, voices: cached.voices };
+  }
+
+  // 2) Cataloguer (instantané) les pistes bouclées non encore en cache. Un SEUL
+  // probe par fichier (voix statiques) -> réutilisé pour toutes ces pistes.
+  const todo = entries.filter((e) => e.loop && cache[keyFor(e)] === undefined);
+  if (todo.length === 0) return;
+
+  let res = null;
+  try {
+    res = await catalogGbsStems({ sourcePath, gdm: GDM });
+  } catch (err) {
+    process.stdout.write(`  ! catalogue voix KO ${fileName} : ${err.message}\n`);
+    res = null;
+  }
+  for (const entry of todo) {
+    cache[keyFor(entry)] = res ?? null;
+    if (res) entry.channels = { sampleRate: res.sampleRate, voices: res.voices };
+  }
+}
+
 async function catalogFile(fileName, caches) {
   const filePath = join(LIBRARY_DIR, fileName);
   const fileStat = await stat(filePath);
@@ -276,6 +382,11 @@ async function catalogFile(fileName, caches) {
 
   await detectLoops(fileName, fileStat, entries, caches.loops);
   await catalogAllStems(fileName, fileStat, entries, caches.stems);
+  // Branches GBS sœurs (gardées `.gbs`, mutuellement exclusives avec les NES) :
+  // boucle (gdm-loop, log d'écritures de registres APU ; activée par défaut,
+  // désactivable VDM_GBS_LOOP=0) puis voix statiques (gdm probe).
+  await detectGbsLoops(fileName, fileStat, entries, caches.loops);
+  await catalogGbsAllStems(fileName, fileStat, entries, caches.stems);
   return entries;
 }
 
@@ -295,7 +406,7 @@ async function main() {
     return;
   }
 
-  console.log('[catalogue] boucles + voix NES via nsftool (auto, incrémental)');
+  console.log('[catalogue] boucles + voix NES (nsftool) & GBS (gdm) via log de registres APU (auto, incrémental)');
   const caches = { loops: await loadLoopCache(CACHE_FILE), stems: await loadJson(STEMS_CACHE_FILE) };
 
   const allTracks = [];

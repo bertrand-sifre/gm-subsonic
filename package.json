@@ -12,6 +12,7 @@
     "library:import": "node tools/import-library.mjs",
     "dev": "nx run-many -t serve --parallel=2",
     "build": "nx run-many -t build",
+    "build:gdm": "nx run gdm:compile",
     "typecheck": "nx run-many -t typecheck",
     "serve:server": "nx serve server",
     "serve:web": "nx serve web"

@@ -22,12 +22,18 @@ API du serveur (Hono + @hono/node-server). Deux responsabilités pour le MVP :
 - `render/` — rendu OGG **à la demande** (cache + dédoublonnage) :
   - `index.ts` (`ensureParametricRender`/`ensureLoopRender`/`ensureChannelRender`, `renderSeamless`),
   - `exec.ts` (spawn), `cache.ts` (`ensureCached` + map inflight), `encode.ts` (crossfade + tags),
-  - `engines/` — **interface `PcmEngine`** (`types.ts`) + `libgme.ts` (mix + paramétrique) + `nsftool.ts` (voix solo).
+  - `engines/` — **interface `PcmEngine`** (`types.ts`) + `libgme.ts` (mix + paramétrique) + `nsftool.ts` (voix solo NES) + `gdm.ts` (GBS via libgme natif : mix **et** voix).
 
 **Points d'extension** : un nouveau moteur audio (USF/SPC…) = un fichier dans `engines/`
 implémentant `PcmEngine` ; une nouvelle famille de source = un `TrackBuilder` dans
-`library/builders/`. Boucle et stems partagent `renderSeamless` (le moteur est choisi par
-`SeamlessRenderRef.channelIndex` : absent → mix libgme, présent → voix nsftool).
+`library/builders/`. Boucle et stems partagent `renderSeamless` ; le moteur est choisi par
+`pickSeamlessEngine(ref)` : source `.gbs` → gdm (mix **et** voix), sinon
+`SeamlessRenderRef.channelIndex` absent → mix libgme, présent → voix nsftool.
+La détection de boucle GBS (`tools/gdm-loop`, **log d'écritures de registres APU** via
+la sous-commande `gdm loop` d'une libgme patchée — même algorithme `analyzeStates` que
+le NES) est **activée par défaut** à l'import (désactivable via `VDM_GBS_LOOP=0`) ; le
+rejet des boucles non périodiques renvoie `null` plutôt qu'une fausse boucle, d'où repli
+paramétrique propre le cas échéant.
 
 ## Endpoints
 

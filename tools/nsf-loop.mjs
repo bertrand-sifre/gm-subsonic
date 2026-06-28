@@ -30,17 +30,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const FPS = 60.0988; // taux de frame NTSC NSF (1789772.7 / 29780.5)
-const SR = 44100; // taux du rendu serveur (pour convertir frames -> échantillons)
+const FPS = 60.0988; // fps NTSC NSF (1789772.7 / 29780.5) — fps autoritaire NES du wrapper
 const LOG_RATE = 8000; // rendu rapide ; le log de registres est rate-indépendant
 const LOG_LEN_MS = 200000; // 200 s : couvre toute boucle <= ~100 s avec marge >= 1 période
-const PMIN_SEC = 1; // période minimale cherchée
-const PMAX_SEC = 100; // période maximale cherchée
-// Garde-fou anti faux-positif : un flux de registres constant/quasi-constant
-// (note tenue, silence, SFX one-shot) « boucle » trivialement à PMIN. Une vraie
-// boucle musicale a beaucoup de frames distinctes ; on rejette les périodes pauvres.
-const MIN_DISTINCT_FRAMES = 8;
 const SPAWN_TIMEOUT_MS = 30000; // garde-fou : tue nsftool si un fichier bloque
+// Les seuils d'analyse (sampleRate 44100, pmin 1 s, pmax 100 s, garde de queue 2 s,
+// minDistinctFrames 8) vivent désormais comme défauts d'`opts` d'analyzeStates.
 
 /**
  * Exécute une commande ; ne rejette jamais. Tue le process après un timeout
@@ -103,17 +98,45 @@ function parseLog(text) {
 }
 
 /**
- * Autocorrélation exacte (port direct de analyze de loopexact.py).
- *  - tailrun(p) : nb de frames contiguës H[i]==H[i+p] depuis i=N-p-1 (descendant).
- *  - candidats : p in [round(1·FPS), min(N-round(2·FPS), round(100·FPS))) avec
- *    tailrun(p) >= p (au moins une période parfaite répétée).
- *  - fondamentaux : candidats qui ne sont multiples d'aucun candidat plus petit.
- *    p_star = plus petit fondamental. Aucun candidat -> null (non périodique).
- *  - loop_start : (dernier mismatch descendant depuis N-p_star-1) + 1.
+ * Autocorrélation exacte d'une suite d'états de frame INTERNÉS (port direct de
+ * analyze + detectLoopFromLog de loopexact.py), PARTAGÉE entre le NES (nsftool) et
+ * le GBS (tools/gdm-loop.mjs via `gdm loop`). `states` = un id entier par frame de
+ * jeu (frames égales <=> mêmes écritures de registres dans le même ordre) ; `fps` =
+ * le frame-rate AUTORITAIRE du log (60.0988 Hz NTSC pour le NES ; 4194304/play_period
+ * émis par l'émulateur pour le GBS). Les seuils vivent dans `opts` (défauts = les
+ * constantes historiques NES -> wrapper NES inchangé bit pour bit).
  *
- * @returns {{ periodFrames: number, loopStartFrames: number } | null}
+ *  - garde courte : log trop court pour intro + >= 1 période + garde de queue -> null.
+ *  - tailrun(p) : nb de frames contiguës states[i]==states[i+p] depuis i=N-p-1.
+ *  - candidats : p in [round(pminSec·fps), min(N-round(tailGuardSec·fps),
+ *    round(pmaxSec·fps))) avec tailrun(p) >= p (au moins une période parfaite répétée).
+ *  - fondamentaux : candidats non multiples d'un candidat plus petit ; p_star = plus
+ *    petit fondamental. Aucun candidat -> null (non périodique).
+ *  - loop_start : (dernier mismatch descendant depuis N-p_star-1) + 1.
+ *  - rejet des boucles triviales : période avec < minDistinctFrames états distincts
+ *    (flux constant : SFX, note tenue, silence) -> null.
+ *
+ * @param {Int32Array|number[]} states  un id de frame par frame de jeu
+ * @param {number} fps                  frame-rate autoritaire (Hz)
+ * @param {object} [opts]               sampleRate/pminSec/pmaxSec/tailGuardSec/minDistinctFrames
+ * @returns {{ startSeconds, lengthSeconds, startSamples, lengthSamples, sampleRate } | null}
  */
-function analyze(H, N) {
+export function analyzeStates(states, fps, opts = {}) {
+  const {
+    sampleRate = 44100,
+    pminSec = 1,
+    pmaxSec = 100,
+    tailGuardSec = 2,
+    minDistinctFrames = 8,
+  } = opts;
+
+  const H = states;
+  const N = H.length;
+
+  const pminFrames = Math.round(pminSec * fps);
+  const tailGuardFrames = Math.round(tailGuardSec * fps);
+  if (N < pminFrames + tailGuardFrames) return null; // log trop court
+
   // tailrun : la longueur de queue exactement répétée à la période p.
   const tailrun = (p) => {
     let i = N - p - 1;
@@ -122,13 +145,13 @@ function analyze(H, N) {
     return r;
   };
 
-  const pmin = Math.round(PMIN_SEC * FPS);
-  const pmax = Math.min(N - Math.round(2 * FPS), Math.round(PMAX_SEC * FPS));
+  const pmin = pminFrames;
+  const pmax = Math.min(N - tailGuardFrames, Math.round(pmaxSec * fps));
   const cands = [];
   for (let p = pmin; p < pmax; p++) {
     if (tailrun(p) >= p) cands.push(p); // au moins une période entière se répète parfaitement
   }
-  if (cands.length === 0) return null; // non proprement périodique <= 100 s -> repli paramétrique
+  if (cands.length === 0) return null; // non proprement périodique -> repli paramétrique
 
   // Fondamentaux = candidats non multiples d'un candidat strictement plus petit.
   // (cands est déjà trié croissant ; on prend le plus petit fondamental.)
@@ -149,40 +172,37 @@ function analyze(H, N) {
     if (H[i] !== H[i + pStar]) { lastMismatch = i; break; }
     i--;
   }
-  const loopStart = lastMismatch + 1; // les frames avant peuvent différer (intro)
+  const loopStartFrames = lastMismatch + 1; // les frames avant peuvent différer (intro)
+  const periodFrames = pStar;
 
-  return { periodFrames: pStar, loopStartFrames: loopStart };
+  // Rejet des « boucles » triviales (flux constant : SFX, note tenue, silence).
+  const seen = new Set();
+  for (let j = loopStartFrames; j < loopStartFrames + periodFrames && j < N; j++) {
+    seen.add(H[j]);
+    if (seen.size >= minDistinctFrames) break;
+  }
+  if (seen.size < minDistinctFrames) return null;
+
+  return {
+    startSeconds: +(loopStartFrames / fps).toFixed(4),
+    lengthSeconds: +(periodFrames / fps).toFixed(4),
+    startSamples: Math.round((loopStartFrames * sampleRate) / fps),
+    lengthSamples: Math.round((periodFrames * sampleRate) / fps),
+    sampleRate,
+  };
 }
 
 /**
- * Détecte la boucle à partir du TEXTE d'un log de registres déjà rendu.
- * Exporté pour test/CLI hors nsftool. La boucle est exprimée en FRAMES
- * (exacte) puis convertie en secondes / échantillons au taux natif.
+ * Détecte la boucle à partir du TEXTE d'un log de registres NES déjà rendu.
+ * Exporté pour test/CLI hors nsftool. Wrapper mince autour d'analyzeStates au fps
+ * NTSC NES (défauts d'opts = constantes historiques) -> comportement bit pour bit
+ * identique à la version pré-refactor.
  *
  * @returns {{ startSeconds, lengthSeconds, startSamples, lengthSamples, sampleRate } | null}
  */
 export function detectLoopFromLog(text) {
-  const { H, N } = parseLog(text);
-  if (N < Math.round(PMIN_SEC * FPS) + Math.round(2 * FPS)) return null; // log trop court
-  const a = analyze(H, N);
-  if (!a) return null;
-  const { periodFrames, loopStartFrames } = a;
-
-  // Rejet des « boucles » triviales (flux constant : SFX, note tenue, silence).
-  const seen = new Set();
-  for (let i = loopStartFrames; i < loopStartFrames + periodFrames && i < N; i++) {
-    seen.add(H[i]);
-    if (seen.size >= MIN_DISTINCT_FRAMES) break;
-  }
-  if (seen.size < MIN_DISTINCT_FRAMES) return null;
-
-  return {
-    startSeconds: +(loopStartFrames / FPS).toFixed(4),
-    lengthSeconds: +(periodFrames / FPS).toFixed(4),
-    startSamples: Math.round((loopStartFrames * SR) / FPS),
-    lengthSamples: Math.round((periodFrames * SR) / FPS),
-    sampleRate: SR,
-  };
+  const { H } = parseLog(text);
+  return analyzeStates(H, FPS);
 }
 
 /**

@@ -25,6 +25,9 @@ export const MAX_FADE = 30;
 /** CLI maison (cœur xgm de nsfplay) ; surchargeable pour les tests/CI. */
 export const NSFTOOL = process.env.VDM_NSFPLAY ?? 'nsftool';
 
+/** CLI gdm (libgme) pour le format GBS : probe + render par canal. Surchargeable (tests/CI). */
+export const GDM = process.env.VDM_GDM ?? 'gdm';
+
 export const CONTENT_TYPES: Record<string, string> = {
   '.wav': 'audio/wav',
   '.ogg': 'audio/ogg',

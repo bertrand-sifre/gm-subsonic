@@ -1,0 +1,227 @@
+# libgme-reglog.patch
+#
+# Patch from-source de libgme exposant un LOG D'ECRITURES APU par frame pour la
+# detection de boucle GBS (Nintendo Game Boy, Gbs_Emu), en parite semantique avec
+# tools/nsf-loop.mjs (NES) : une frame = la sequence ordonnee des ecritures APU
+# (paires reg,data) effectuees par la play routine de cette frame. Deux frames
+# sont egales ssi memes (reg,data) dans le meme ordre -> aucune derive de
+# loopStart (pas de snapshot d'etat, contrairement a l'ancienne voie PCM).
+#
+# CIBLE : clone game-music-emu @ libgme 0.6.4
+#   SHA  : f0d9517c5c3e0b712f553baa62e213336587d52e
+#   repo : https://github.com/libgme/game-music-emu
+# Applique par le stage Docker `gdmbuilder` :
+#   git -C libgme apply --check ../libgme-reglog.patch && \
+#   git -C libgme apply         ../libgme-reglog.patch
+#
+# MECANIQUE (aucun patch de Gb_Apu : on n'echantillonne PAS l'etat) :
+#   - Gb_Cpu.cpp  : #define GME_APU_HOOK(emu,reg,data) -> emu->vdm_log_write(...)
+#       expanse a gb_cpu_io.h, DANS Gbs_Emu::cpu_write (this == Gbs_Emu*), a chaque
+#       ecriture APU du chemin CPU (init + play routines). Macro SCOPEE a cette TU.
+#   - Gbs_Emu.cpp : #define GME_FRAME_HOOK(emu) -> emu->vdm_log_frame()
+#       expanse 1x par play_period dans run_clocks (ferme la frame courante ; le 1er
+#       hook jette les WRITE d'INIT, exactement comme parseLog de nsf-loop).
+#   - Gbs_Emu.h   : l'accumulateur (vdm_cur_) et le log (vdm_log_) vivent comme
+#       MEMBRES de Gbs_Emu -> aucun etat statique cross-TU.
+#   - gme.h/gme.cpp : 6 wrappers C (gme_vdm_*) + le feature macro GME_HAS_VDM_REGLOG
+#       (decouple le build hote stock : gdm garde `loop` derriere #ifdef).
+#
+# Les writes sound_data d'INIT (Gbs_Emu.cpp:216) passent par apu.write_register
+# DIRECT, sans GME_APU_HOOK -> naturellement hors log.
+#
+# Frame-rate exact (conversion frame->echantillon cote JS) :
+#   fps = 4194304 / play_period (horloge CPU GB ; play_period deja corrige TMA/TAC
+#   et tempo par update_timer). Defaut (timer off) = 4194304 / 70224 = 59.7275 Hz.
+#
+# Licence : libgme = LGPL-2.1. Lien STATIQUE dans gdm -> clause de relink LGPL Sec.6
+# satisfaite (ce patch + les sources epinglees sont versionnes).
+diff --git a/gme/Gb_Cpu.cpp b/gme/Gb_Cpu.cpp
+index 425c3e1..c1f207c 100644
+--- a/gme/Gb_Cpu.cpp
++++ b/gme/Gb_Cpu.cpp
+@@ -1,5 +1,12 @@
+ // Game_Music_Emu https://bitbucket.org/mpyne/game-music-emu/
+ 
++// [vdm] Override SCOPE du write hook APU (cette seule TU GB). emu == this
++// (Gbs_Emu*) car gb_cpu_io.h appelle GME_APU_HOOK(this, reg, data) DANS
++// Gbs_Emu::cpu_write. Doit preceder l'include (Classic_Emu.h voit alors la macro
++// deja definie -> #ifndef la garde). Gb_Cpu.cpp est GB-specifique : unique
++// call-site de GME_APU_HOOK = gb_cpu_io.h, aucun autre chip compile ici.
++#define GME_APU_HOOK( emu, reg, data ) ((emu)->vdm_log_write((reg),(data)))
++
+ #include "Gb_Cpu.h"
+ 
+ #include <string.h>
+diff --git a/gme/Gbs_Emu.cpp b/gme/Gbs_Emu.cpp
+index 1198c6f..c078273 100644
+--- a/gme/Gbs_Emu.cpp
++++ b/gme/Gbs_Emu.cpp
+@@ -1,5 +1,11 @@
+ // Game_Music_Emu https://bitbucket.org/mpyne/game-music-emu/
+ 
++// [vdm] Override SCOPE du frame hook (cette seule TU). emu == this (Gbs_Emu*).
++// Doit preceder l'include : Classic_Emu.h voit alors GME_FRAME_HOOK deja defini
++// (branche #else, GME_FRAME_HOOK_DEFINED 1) et ne l'ecrase pas. Expanse a la
++// ligne `GME_FRAME_HOOK( this )` de run_clocks (1x par play_period).
++#define GME_FRAME_HOOK( emu ) ((emu)->vdm_log_frame())
++
+ #include "Gbs_Emu.h"
+ 
+ #include "blargg_endian.h"
+diff --git a/gme/Gbs_Emu.h b/gme/Gbs_Emu.h
+index d963f40..f9468c5 100644
+--- a/gme/Gbs_Emu.h
++++ b/gme/Gbs_Emu.h
+@@ -8,6 +8,8 @@
+ #include "Gb_Apu.h"
+ #include "Gb_Cpu.h"
+ 
++#include <vector> // [vdm] log d'ecritures APU par frame (detection de boucle GBS)
++
+ class Gbs_Emu : private Gb_Cpu, public Classic_Emu {
+ 	typedef Gb_Cpu cpu;
+ public:
+@@ -37,6 +39,35 @@ public:
+ 	// Header for currently loaded file
+ 	header_t const& header() const { return header_; }
+ 
++	// [vdm] Log d'ECRITURES APU par frame (parite tools/nsf-loop.mjs). A activer
++	// AVANT gme_start_track. Une frame = la sequence ordonnee des (reg,data) ecrits
++	// par la play routine de cette frame ; aucun snapshot d'etat -> loopStart exact.
++	void vdm_enable_reg_log( bool on )                 // (re)arme l'accumulateur
++			{ vdm_log_on_ = on; vdm_started_ = false; vdm_cur_.clear(); vdm_log_.clear(); }
++	void vdm_log_write( int reg, int data )            // appele par GME_APU_HOOK (Gb_Cpu.cpp)
++	{
++		if ( !vdm_log_on_ ) return;
++		vdm_cur_.push_back( (unsigned char) reg );
++		vdm_cur_.push_back( (unsigned char) data );
++	}
++	void vdm_log_frame()                               // appele par GME_FRAME_HOOK (Gbs_Emu.cpp)
++	{
++		if ( !vdm_log_on_ ) return;
++		if ( vdm_started_ ) vdm_log_.push_back( vdm_cur_ ); // ferme la frame precedente
++		else vdm_started_ = true;                           // jette les WRITE d'INIT (avant 1er PLAY)
++		vdm_cur_.clear();
++	}
++	void vdm_finish()                                  // flush la derniere frame (pas de hook final)
++	{
++		if ( vdm_log_on_ && vdm_started_ ) { vdm_log_.push_back( vdm_cur_ ); vdm_cur_.clear(); }
++	}
++	int  vdm_reg_log_frames() const { return (int) vdm_log_.size(); }
++	int  vdm_frame_size( int f ) const
++			{ return ( (unsigned) f < vdm_log_.size() ) ? (int) vdm_log_ [f].size() : 0; }
++	unsigned char const* vdm_frame_data( int f ) const
++			{ return ( (unsigned) f < vdm_log_.size() ) ? vdm_log_ [f].data() : 0; }
++	double vdm_frame_rate() const { return play_period ? 4194304.0 / play_period : 0.0; }
++
+ 	static gme_type_t static_type() { return gme_gbs_type; }
+ 
+ public:
+@@ -72,6 +103,12 @@ private:
+ 	header_t header_;
+ 	void cpu_jsr( gb_addr_t );
+ 
++	// [vdm] Accumulateur + log d'ecritures APU (NSDMI : libgme compile en C++11+).
++	bool vdm_log_on_ = false;        // arme par vdm_enable_reg_log
++	bool vdm_started_ = false;       // vrai des le 1er GME_FRAME_HOOK (1er PLAY)
++	std::vector<unsigned char> vdm_cur_;               // frame en cours (paires reg,data)
++	std::vector<std::vector<unsigned char> > vdm_log_; // une entree par frame de jeu
++
+ public: private: friend class Gb_Cpu;
+ 	blip_time_t clock() const { return cpu_time - cpu::remain(); }
+ 
+diff --git a/gme/gme.cpp b/gme/gme.cpp
+index 595e00f..212cc69 100644
+--- a/gme/gme.cpp
++++ b/gme/gme.cpp
+@@ -10,6 +10,7 @@
+ #if !GME_DISABLE_STEREO_DEPTH
+ #include "Effects_Buffer.h"
+ #endif
++#include "Gbs_Emu.h" // [vdm] wrappers C du log d'ecritures APU GBS (gme_vdm_*)
+ #include "blargg_endian.h"
+ #include <string.h>
+ #include <ctype.h>
+@@ -435,3 +436,42 @@ const char* gme_type_system( gme_type_t type )
+ 	assert( type );
+ 	return type->system;
+ }
++
++/* [vdm] Log d'ecritures APU GBS (detection de boucle, parite tools/nsf-loop.mjs).
++   RTTI desactive (-fno-rtti) -> on teste type() AVANT static_cast, jamais dynamic_cast.
++   Tous no-op / 0 si l'emulateur n'est pas un Gbs_Emu. */
++void gme_vdm_enable_reg_log( Music_Emu* me, int e )
++{
++	if ( me && me->type() == gme_gbs_type )
++		static_cast<Gbs_Emu*>( me )->vdm_enable_reg_log( e != 0 );
++}
++
++void gme_vdm_finish( Music_Emu* me )
++{
++	if ( me && me->type() == gme_gbs_type )
++		static_cast<Gbs_Emu*>( me )->vdm_finish();
++}
++
++int gme_vdm_reg_log_frames( Music_Emu const* me )
++{
++	return ( me && me->type() == gme_gbs_type )
++			? static_cast<Gbs_Emu const*>( me )->vdm_reg_log_frames() : 0;
++}
++
++int gme_vdm_frame_size( Music_Emu const* me, int f )
++{
++	return ( me && me->type() == gme_gbs_type )
++			? static_cast<Gbs_Emu const*>( me )->vdm_frame_size( f ) : 0;
++}
++
++unsigned char const* gme_vdm_frame_data( Music_Emu const* me, int f )
++{
++	return ( me && me->type() == gme_gbs_type )
++			? static_cast<Gbs_Emu const*>( me )->vdm_frame_data( f ) : 0;
++}
++
++double gme_vdm_frame_rate( Music_Emu const* me )
++{
++	return ( me && me->type() == gme_gbs_type )
++			? static_cast<Gbs_Emu const*>( me )->vdm_frame_rate() : 0.0;
++}
+diff --git a/gme/gme.h b/gme/gme.h
+index b3eb54c..3d60be0 100644
+--- a/gme/gme.h
++++ b/gme/gme.h
+@@ -319,6 +319,35 @@ typedef void (*gme_user_cleanup_t)( void* user_data );
+ BLARGG_EXPORT void gme_set_user_cleanup( Music_Emu*, gme_user_cleanup_t func );
+ 
+ 
++/******** [vdm] Log d'ecritures APU GBS (detection de boucle, parite nsf-loop) ********/
++
++/* Marqueur de fonctionnalite : present => libgme patche (log d'ecritures APU GBS).
++   gdm.cpp garde sa sous-commande `loop` derriere #ifdef GME_HAS_VDM_REGLOG => les
++   sous-commandes probe/render restent compilables contre une libgme STOCK (brew/apt)
++   ou ce define est absent. */
++#define GME_HAS_VDM_REGLOG 1
++
++/* Active/desactive le log d'ecritures APU. A appeler AVANT gme_start_track. GBS
++   uniquement (no-op silencieux pour les autres formats). */
++BLARGG_EXPORT void gme_vdm_enable_reg_log( Music_Emu*, int enable );
++
++/* Flush la derniere frame partielle (aucun frame-hook ne la ferme). A appeler
++   apres la derniere passe de gme_play, avant de lire le log. */
++BLARGG_EXPORT void gme_vdm_finish( Music_Emu* );
++
++/* Nombre de frames de jeu enregistrees (0 si non patche / non GBS). */
++BLARGG_EXPORT int  gme_vdm_reg_log_frames( Music_Emu const* );
++
++/* Taille en octets de la frame `frame` (paires reg,data : 2 octets/ecriture). */
++BLARGG_EXPORT int  gme_vdm_frame_size( Music_Emu const*, int frame );
++
++/* Pointeur sur les octets de la frame `frame` (NULL si hors plage). */
++BLARGG_EXPORT unsigned char const* gme_vdm_frame_data( Music_Emu const*, int frame );
++
++/* Frame-rate exact en Hz (4194304 / play_period, deja corrige TMA/TAC/tempo). */
++BLARGG_EXPORT double gme_vdm_frame_rate( Music_Emu const* );
++
++
+ #ifdef __cplusplus
+ 	}
+ #endif

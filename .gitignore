@@ -4,6 +4,10 @@ dist
 *.log
 .DS_Store
 
+# Binaire C++ gdm compilé sur l'hôte (artefact spécifique à la plateforme ;
+# le binaire embarqué est compilé dans le stage Docker `gdmbuilder`).
+tools/gdm/build/
+
 # Réglages Claude Code locaux (machine).
 .claude/settings.local.json
 

@@ -11,13 +11,25 @@
  */
 
 import { rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { extname, join } from 'node:path';
 import { CACHE_DIR } from '../config.js';
 import type { RenderRef, SeamlessRenderRef } from '../library/types.js';
 import { ensureCached } from './cache.js';
 import { encodeSeamlessOgg, LOOP_EPSILON_SAMPLES } from './encode.js';
+import { gdmEngine } from './engines/gdm.js';
 import { libgmeEngine, renderParametricOgg } from './engines/libgme.js';
 import { nsftoolEngine } from './engines/nsftool.js';
+import type { PcmEngine } from './engines/types.js';
+
+/**
+ * Choix du moteur PCM seamless. GBS → gdm (libgme natif : MIX *et* voix isolée
+ * via mute). Toute autre source garde EXACTEMENT le dispatch d'origine : voix
+ * isolée → nsftool (NES), mix → libgme. Le chemin NSF n'est jamais modifié.
+ */
+function pickSeamlessEngine(ref: SeamlessRenderRef): PcmEngine {
+  if (extname(ref.sourcePath).toLowerCase() === '.gbs') return gdmEngine;
+  return ref.channelIndex != null ? nsftoolEngine : libgmeEngine;
+}
 
 /**
  * Rendu sans couture [intro + corps bouclable]. Le moteur PCM est choisi par la
@@ -25,7 +37,7 @@ import { nsftoolEngine } from './engines/nsftool.js';
  * [intro + boucle + ε] en WAV, puis on encode l'OGG bouclable + tags de boucle.
  */
 async function renderSeamless(outPath: string, ref: SeamlessRenderRef): Promise<void> {
-  const engine = ref.channelIndex != null ? nsftoolEngine : libgmeEngine;
+  const engine = pickSeamlessEngine(ref);
   const endSample = ref.introSamples + ref.loopLengthSamples + LOOP_EPSILON_SAMPLES;
   const wav = `${outPath}.tmp.wav`;
   try {

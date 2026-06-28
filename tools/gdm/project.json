@@ -1,0 +1,33 @@
+{
+  "name": "gdm",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "application",
+  "sourceRoot": "tools/gdm",
+  "targets": {
+    "compile": {
+      "executor": "nx:run-commands",
+      "cache": true,
+      "inputs": [
+        "{projectRoot}/**/*.cpp",
+        "{projectRoot}/**/*.h",
+        "{projectRoot}/CMakeLists.txt"
+      ],
+      "outputs": ["{projectRoot}/build/gdm"],
+      "options": {
+        "cwd": "tools/gdm",
+        "parallel": false,
+        "commands": [
+          "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release",
+          "cmake --build build --target gdm -j"
+        ]
+      }
+    },
+    "clean": {
+      "executor": "nx:run-commands",
+      "options": {
+        "cwd": "tools/gdm",
+        "command": "rm -rf build"
+      }
+    }
+  }
+}
