@@ -15,7 +15,7 @@ Voici la liste des formats pour chaque format on ecrit le statut de son impléme
 | AY | Amstrad CPC/Spectrum ZX/Atari ST | Oui | Non | Non | Oui | libgme (`Ay_Emu`) / ZXTune |
 | COP | Sam Coupe | Oui | Non | Oui | Non | SCPlayer (+ SAASound) |
 | DSF | Sega Dreamcast | Oui | Non | Partiel | Non | Highly_Theoretical (aosdk) |
-| GBS | Nintendo Gameboy | Oui | Non | Non | Oui | libgme (`Gbs_Emu`) |
+| GBS | Nintendo Gameboy | Oui | Oui | Oui | Oui | `gdm` : libgme `Gbs_Emu` patchée (mix + canal par mute + log registres APU) |
 | GSF | Nintendo Gameboy Advance | Oui | Non | Non | Non/Partiel | mGBA + psflib |
 | GYM | Sega Megadrive/Genesis | Oui | Partiel | Partiel | Oui | libgme / libvgm |
 | HES | PC Engine | Oui | Non | Non | Oui | libgme (`Hes_Emu`) |
@@ -58,6 +58,9 @@ Trois familles selon ce que le format expose :
 - **Émulation chip + driver** (SID, SPC, SAP, GBS, HES, KSS, AY…) → lecture + mute de canal
   OK (`gme_mute_voice`, `mute()`…), mais **pas de point de boucle natif** : recourir aux
   tags (xid6), à une base de durées (HVSC pour SID) ou à une détection de boucle maison.
+  **Réalisé pour le GBS** : binaire `gdm` (libgme **patchée**, liée en statique) → log
+  d'écritures de registres APU par frame → boucle **frame-exacte** (parité nsf-loop) +
+  stems par mute. Détails : `docs/etude-gbs-libgme.md`.
 - **Famille *SF / exécutable émulé** (PSF, PSF2, QSF, DSF, SSF, GSF) → lecture excellente
   mais **ni intro/loop exposés, ni isolation de canal** par API (boucle interne au
   séquenceur). Mal adaptés aux stems Web Audio sans patcher l'émulateur.
