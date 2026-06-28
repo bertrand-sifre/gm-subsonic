@@ -46,12 +46,16 @@ const STEMS_CACHE_FILE = join(MEDIA_DIR, 'stems.cache.json');
 
 // Schéma du cache de boucles. Schéma 3 : le détecteur GBS est passé de l'ancienne
 // heuristique PCM (autocorrélation d'enveloppe RMS/NCC, coarse->fine) au LOG
-// D'ÉCRITURES de registres APU (sous-commande `gdm loop`, parité nsf-loop) ; les
-// valeurs sous les MÊMES clés `fichier#piste@mtime:size` ne sont plus comparables.
-// Le bump force une re-détection propre (le NES est re-détecté une fois à
-// l'identique, déterministe -> sans risque). Un cache de schéma inférieur est
-// traité comme vide.
-const LOOP_CACHE_SCHEMA = 3;
+// D'ÉCRITURES de registres APU (sous-commande `gdm loop`, parité nsf-loop).
+// Schéma 4 : raffinement GBS du loopStart (on ignore l'artefact d'init de la frame 0
+// -> boucle dès 0 sur les pistes sans intro ; et on cale loopStart sur une frame
+// dont l'état complet des registres coïncide une période plus loin -> raccord propre).
+// Schéma 5 : la boucle détectée porte désormais `frameRate` (repère « frame » du
+// lecteur) ; on re-détecte pour le renseigner dans le manifeste.
+// Les valeurs sous les MÊMES clés `fichier#piste@mtime:size` ne sont plus comparables ;
+// le bump force une re-détection propre (le NES est re-détecté une fois à l'identique,
+// déterministe -> sans risque). Un cache de schéma inférieur est traité comme vide.
+const LOOP_CACHE_SCHEMA = 5;
 
 const FALLBACK_SECONDS = Number(process.env.VDM_FALLBACK_SECONDS ?? 120);
 const CONCURRENCY = 6;

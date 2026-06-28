@@ -57,6 +57,14 @@ export interface Progress {
   iteration: number;
   /** Total de boucles (`null` = infini). */
   totalLoops: number | null;
+  /** Temps écoulé depuis le départ (horloge audio), en secondes. */
+  elapsed: number;
+  /**
+   * Position dans le MATÉRIAU source en secondes : monte en intro [0, loopStart],
+   * puis CYCLE dans [loopStart, loopEnd] à chaque boucle (≠ elapsed qui ne fait que
+   * croître). Multiplié par `LoopInfo.frameRate`, donne le n° de frame du moteur.
+   */
+  sourceTime: number;
 }
 
 export class LoopPlayer {
@@ -246,10 +254,10 @@ export class LoopPlayer {
 
     if (t.noLoop) {
       const dur = t.bufferDur || 1;
-      return { phase: 'linear', frac: Math.min(1, elapsed / dur), introDur: 0, loopDur: dur, iteration: 0, totalLoops: null };
+      return { phase: 'linear', frac: Math.min(1, elapsed / dur), introDur: 0, loopDur: dur, iteration: 0, totalLoops: null, elapsed, sourceTime: Math.min(elapsed, dur) };
     }
     if (elapsed < t.introDur) {
-      return { phase: 'intro', frac: t.introDur ? elapsed / t.introDur : 1, introDur: t.introDur, loopDur: t.loopDur, iteration: 0, totalLoops: t.totalLoops };
+      return { phase: 'intro', frac: t.introDur ? elapsed / t.introDur : 1, introDur: t.introDur, loopDur: t.loopDur, iteration: 0, totalLoops: t.totalLoops, elapsed, sourceTime: elapsed };
     }
 
     const loopElapsed = elapsed - t.introDur;
@@ -267,6 +275,8 @@ export class LoopPlayer {
         loopDur: t.loopDur,
         iteration: t.totalLoops,
         totalLoops: t.totalLoops,
+        elapsed,
+        sourceTime: loopEnd + Math.min(tailElapsed, tailDur),
       };
     }
 
@@ -278,6 +288,8 @@ export class LoopPlayer {
       loopDur: t.loopDur,
       iteration: iter + 1,
       totalLoops: t.totalLoops,
+      elapsed,
+      sourceTime: t.introDur + posInLoop,
     };
   }
 

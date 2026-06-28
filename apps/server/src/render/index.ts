@@ -64,12 +64,22 @@ export function ensureParametricRender(
   return ensureCached(outPath, (out) => renderParametricOgg(ref, seconds, fade, out));
 }
 
-/** Garantit l'artefact de boucle en cache (clé stable, sans paramètre). */
-export function ensureLoopRender(id: string, ref: SeamlessRenderRef): Promise<string> {
-  return ensureCached(join(CACHE_DIR, `${id}__loop.ogg`), (out) => renderSeamless(out, ref));
+/**
+ * Signature des bornes de boucle, incluse dans la clé de cache : si la détection
+ * change (loopStart/longueur), la clé change → re-rendu frais. Sinon un artefact
+ * PÉRIMÉ (rendu avec d'anciennes bornes, donc d'une autre durée) serait resservi
+ * et le lecteur boucle au bout du buffer, décalé de la barre.
+ */
+function loopSig(ref: SeamlessRenderRef): string {
+  return `${ref.introSamples}_${ref.loopLengthSamples}`;
 }
 
-/** Garantit le stem d'une voix en cache (clé stable par piste + canal). */
+/** Garantit l'artefact de boucle en cache (clé = id + bornes de boucle). */
+export function ensureLoopRender(id: string, ref: SeamlessRenderRef): Promise<string> {
+  return ensureCached(join(CACHE_DIR, `${id}__loop_${loopSig(ref)}.ogg`), (out) => renderSeamless(out, ref));
+}
+
+/** Garantit le stem d'une voix en cache (clé = id + canal + bornes de boucle). */
 export function ensureChannelRender(id: string, chan: string, ref: SeamlessRenderRef): Promise<string> {
-  return ensureCached(join(CACHE_DIR, `${id}__ch_${chan}.ogg`), (out) => renderSeamless(out, ref));
+  return ensureCached(join(CACHE_DIR, `${id}__ch_${chan}__${loopSig(ref)}.ogg`), (out) => renderSeamless(out, ref));
 }

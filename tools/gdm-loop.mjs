@@ -70,14 +70,16 @@ function run(cmd, args, timeoutMs) {
 }
 
 /**
- * Parse la sortie STDOUT de `gdm loop` (en-tête + N lignes hex) en une suite
- * d'états de frame INTERNÉS, prête pour analyzeStates. L'internement par égalité
- * de CHAÎNE EXACTE reproduit l'égalité entière de nsf-loop (parseLog) : deux frames
- * identiques (mêmes octets reg,data dans le même ordre) -> même id ; une ligne vide
- * (frame sans écriture) interne vers un id stable. Le compteur `frames=N` de
- * l'en-tête lève l'ambiguïté du newline final de split('\n').
+ * Parse la sortie STDOUT de `gdm loop` (en-tête + N lignes hex) en DEUX vues par
+ * frame, prêtes pour analyzeStates :
+ *  - delta : id de la ligne d'écritures (égalité de chaîne exacte, parité nsf-loop) ;
+ *            sert à la période et au loopStart.
+ *  - full  : id de l'ÉTAT des 48 registres APU (FF10..FF3F) obtenu en REJOUANT les
+ *            écritures ; capte la NOTE TENUE (invisible au delta), sert au raffinement
+ *            seamless du loopStart.
+ * Le compteur `frames=N` de l'en-tête lève l'ambiguïté du newline final de split.
  *
- * @returns {{ states: Int32Array, fps: number } | null}
+ * @returns {{ delta: Int32Array, full: Int32Array, fps: number } | null}
  */
 function parseRegLog(stdout) {
   const lines = stdout.split('\n');
@@ -87,15 +89,27 @@ function parseRegLog(stdout) {
   const N = parseInt(m[2], 10);
   if (!(fps > 0) || !(N > 0)) return null;
 
-  const ids = new Map();
-  const states = new Int32Array(N);
+  const dIds = new Map();
+  const sIds = new Map();
+  const delta = new Int32Array(N);
+  const full = new Int32Array(N);
+  const reg = new Uint8Array(48); // état courant des 48 registres APU (FF10..FF3F)
   for (let f = 0; f < N; f++) {
-    const key = lines[1 + f] ?? ''; // frame sans écriture -> ligne vide = id stable
-    let id = ids.get(key);
-    if (id === undefined) { id = ids.size; ids.set(key, id); }
-    states[f] = id;
+    const line = lines[1 + f] ?? ''; // frame sans écriture -> ligne vide
+    let dId = dIds.get(line);
+    if (dId === undefined) { dId = dIds.size; dIds.set(line, dId); }
+    delta[f] = dId;
+    for (let i = 0; i + 4 <= line.length; i += 4) { // rejoue les paires (reg,data)
+      const rr = parseInt(line.slice(i, i + 2), 16);
+      const dd = parseInt(line.slice(i + 2, i + 4), 16);
+      if (rr < 48) reg[rr] = dd;
+    }
+    const key = Buffer.from(reg).toString('latin1'); // snapshot des 48 octets
+    let sId = sIds.get(key);
+    if (sId === undefined) { sId = sIds.size; sIds.set(key, sId); }
+    full[f] = sId;
   }
-  return { states, fps };
+  return { delta, full, fps };
 }
 
 /**
@@ -129,13 +143,17 @@ export async function detectLoop({ sourcePath, trackIndex, gdm = 'gdm' }) {
 
   const parsed = parseRegLog(r.stdout);
   if (!parsed) return null; // en-tête absente / fps ou frames invalides -> repli
-  const { states, fps } = parsed;
+  const { delta, full, fps } = parsed;
 
-  const loop = analyzeStates(states, fps);
+  // Période + loopStart sur le delta (parité nsf-loop), en IGNORANT l'artefact d'init
+  // de la frame 0 (sinon fausse intro d'1 frame sur les pistes qui bouclent dès 0) et
+  // en RAFFINANT loopStart via l'état complet (full) pour un raccord seamless propre
+  // (sinon la note tenue à la frontière vient de l'intro).
+  const loop = analyzeStates(delta, fps, { ignoreFirstFrameMismatch: true, refineStates: full });
 
   if (process.env.VDM_GBS_LOOP_DEBUG) {
     process.stderr.write(
-      `[gdm-loop] method=register-log fps=${fps.toFixed(4)} frames=${states.length} ` +
+      `[gdm-loop] method=register-log fps=${fps.toFixed(4)} frames=${delta.length} ` +
       `loop=${loop
         ? `start=${loop.startSeconds}s length=${loop.lengthSeconds}s ` +
           `samples[start=${loop.startSamples} len=${loop.lengthSamples}]`

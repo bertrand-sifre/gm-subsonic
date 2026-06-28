@@ -47,7 +47,7 @@ async function buildEmulated(entry: MetaTrack, ctx: BuildContext): Promise<Track
   if (entry.loop) {
     const loopStart = entry.loop.startSeconds;
     const loopEnd = entry.loop.startSeconds + entry.loop.lengthSeconds;
-    track.loop = { loopStart, loopEnd };
+    track.loop = { loopStart, loopEnd, frameRate: entry.loop.frameRate };
     // L'artefact rendu dure intro + 1 boucle : recaler la durée pour que le
     // client ne calcule pas de fausse queue.
     track.duration = loopEnd;

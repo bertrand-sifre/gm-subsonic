@@ -139,6 +139,14 @@
     return `${m}:${String(s).padStart(2, '0')}`;
   }
 
+  // Temps précis (m:ss.mmm) pour le timer de diagnostic.
+  function fmtMs(seconds: number): string {
+    const m = Math.floor(seconds / 60);
+    const s = Math.floor(seconds % 60);
+    const ms = Math.floor((seconds % 1) * 1000);
+    return `${m}:${String(s).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+  }
+
   // --- Visualisation live -----------------------------------------------------
 
   // Couleur d'une voix d'après son type de canal APU (repère visuel).
@@ -162,7 +170,8 @@
   function startLoop() {
     if (raf) return;
     const frame = () => {
-      progress = player.getProgress();
+      const p = player.getProgress();
+      if (p) progress = p; // fige le dernier état si la lecture s'arrête (getProgress -> null)
       const analysers = player.getAnalysers();
       for (const [id, an] of analysers) {
         const c = scopeCanvases[id];
@@ -175,7 +184,8 @@
   function stopLoop() {
     if (raf) cancelAnimationFrame(raf);
     raf = 0;
-    progress = null;
+    // On NE remet PAS `progress` à null : on fige le dernier état (temps/frame/boucle)
+    // pour que le timer reste lisible après un stop / une fin de lecture.
   }
   $: if (status === 'playing') startLoop();
   else stopLoop();
@@ -247,6 +257,17 @@
       : 0;
   $: playPct = computePlayPct(progress);
   $: counterLabel = progressLabel(progress);
+
+  // Timer de diagnostic : frame-rate du moteur (si dispo) + bornes de boucle en frames.
+  $: frameRate = current?.loop?.frameRate ?? 0;
+  $: loopFrames =
+    current?.loop && frameRate
+      ? {
+          start: Math.round(current.loop.loopStart * frameRate),
+          end: Math.round(current.loop.loopEnd * frameRate),
+          len: Math.round((current.loop.loopEnd - current.loop.loopStart) * frameRate),
+        }
+      : null;
 </script>
 
 <main>
@@ -282,10 +303,21 @@
       {/if}
     </div>
 
-    {#if status === 'playing' && progress}
-      <div class="progress">
-        {#if !current?.channels}
-          <!-- Pas de stems : oscilloscope du mix. -->
+    {#if progress}
+      <div class="progress" class:frozen={status !== 'playing'}>
+        <div class="timer">
+          <span class="t-elapsed">{status === 'playing' ? '⏱' : '⏸'} {fmtMs(progress.elapsed)}</span>
+          <span class="t-sep">·</span>
+          <span class="t-pos">pos {fmtMs(progress.sourceTime)}</span>
+          {#if frameRate}
+            <span class="t-frame">frame {Math.round(progress.sourceTime * frameRate)}</span>
+          {/if}
+          {#if loopFrames}
+            <span class="t-loop">boucle [{loopFrames.start}–{loopFrames.end}] · {loopFrames.len} f @ {frameRate} Hz</span>
+          {/if}
+        </div>
+        {#if status === 'playing' && !current?.channels}
+          <!-- Pas de stems : oscilloscope du mix (live uniquement). -->
           <canvas class="scope mix" bind:this={scopeCanvases['__main__']}></canvas>
         {/if}
         <div class="bar-row">
@@ -627,6 +659,38 @@
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
+  }
+  /* Timer de diagnostic (temps joué / position source / frame moteur). */
+  .timer {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.78rem;
+    font-variant-numeric: tabular-nums;
+    color: #9b96b8;
+  }
+  .timer .t-elapsed {
+    color: #e8e6f0;
+    font-weight: 600;
+  }
+  .timer .t-frame {
+    color: #7fe9cf;
+    font-weight: 600;
+  }
+  .timer .t-loop {
+    color: #b9b2e6;
+    margin-left: auto;
+  }
+  .timer .t-sep {
+    opacity: 0.4;
+  }
+  /* État figé (après stop / fin) : on garde les infos lisibles, barre atténuée. */
+  .progress.frozen .bar {
+    opacity: 0.65;
+  }
+  .progress.frozen .playhead {
+    box-shadow: none;
   }
   .bar-row {
     display: flex;

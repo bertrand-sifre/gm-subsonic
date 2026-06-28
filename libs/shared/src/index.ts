@@ -12,6 +12,12 @@ export interface LoopInfo {
   loopStart: number;
   /** Fin de la section qui se répète. La queue est [loopEnd, durée]. */
   loopEnd: number;
+  /**
+   * Frame-rate du moteur (Hz) ayant servi à la détection : ~60.0988 (NES) ou
+   * 4194304/play_period (GBS, p.ex. 64). Optionnel — sert au repère « frame » du
+   * lecteur (diagnostic). Absent pour une boucle statique (tags Vorbis).
+   */
+  frameRate?: number;
 }
 
 /**

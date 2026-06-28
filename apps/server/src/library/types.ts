@@ -22,13 +22,15 @@ export interface MetaTrack {
   trackIndex?: number;
   defaultSeconds?: number;
   defaultFade?: number;
-  /** Boucle détectée (tools/nsf-loop.mjs) pour une piste émulée. */
+  /** Boucle détectée (tools/nsf-loop.mjs, tools/gdm-loop.mjs) pour une piste émulée. */
   loop?: {
     startSeconds: number;
     lengthSeconds: number;
     startSamples: number;
     lengthSamples: number;
     sampleRate: number;
+    /** Frame-rate du moteur (Hz) — repère « frame » côté lecteur. */
+    frameRate?: number;
   };
   /** Voix (stems) cataloguées (tools/nsf-stems.mjs) pour une piste NES. */
   channels?: {

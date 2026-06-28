@@ -128,6 +128,14 @@ export function analyzeStates(states, fps, opts = {}) {
     pmaxSec = 100,
     tailGuardSec = 2,
     minDistinctFrames = 8,
+    // GBS : la 1re frame de jeu porte le one-shot d'init (upload wave RAM, config)
+    // jamais rejoué à la boucle -> mismatch BÉNIN. Quand activé, on exclut la frame 0
+    // du scan loopStart (=> boucle dès la frame 0 si le reste est périodique).
+    ignoreFirstFrameMismatch = false,
+    // GBS : le log d'ÉCRITURES (delta) est aveugle à la NOTE TENUE. refineStates (un
+    // id d'ÉTAT complet des registres par frame) avance loopStart vers la 1re frame
+    // dont l'état coïncide une période plus loin -> raccord sans note résiduelle.
+    refineStates = null,
   } = opts;
 
   const H = states;
@@ -166,14 +174,26 @@ export function analyzeStates(states, fps, opts = {}) {
   if (pStar < 0) pStar = cands[0];
 
   // loop_start : 1re frame à partir de laquelle la queue est exactement périodique.
+  // scanFloor=1 (ignoreFirstFrameMismatch) saute la frame 0 (artefact d'init GBS).
+  const scanFloor = ignoreFirstFrameMismatch ? 1 : 0;
   let i = N - pStar - 1;
   let lastMismatch = -1;
-  while (i >= 0) {
+  while (i >= scanFloor) {
     if (H[i] !== H[i + pStar]) { lastMismatch = i; break; }
     i--;
   }
-  const loopStartFrames = lastMismatch + 1; // les frames avant peuvent différer (intro)
+  let loopStartFrames = lastMismatch + 1; // les frames avant peuvent différer (intro)
   const periodFrames = pStar;
+
+  // Raffinement seamless : si une vraie intro précède la boucle, avancer loopStart
+  // vers la 1re frame dont l'ÉTAT complet (refineStates) coïncide une période plus
+  // loin -> la note tenue à la frontière provient de l'intérieur de la boucle, donc
+  // pas de raccord sur une note résiduelle de l'intro. (Sans refineStates : no-op.)
+  if (refineStates && loopStartFrames > 0) {
+    for (let L = loopStartFrames; L < loopStartFrames + periodFrames && L + periodFrames < N; L++) {
+      if (refineStates[L] === refineStates[L + periodFrames]) { loopStartFrames = L; break; }
+    }
+  }
 
   // Rejet des « boucles » triviales (flux constant : SFX, note tenue, silence).
   const seen = new Set();
@@ -189,6 +209,7 @@ export function analyzeStates(states, fps, opts = {}) {
     startSamples: Math.round((loopStartFrames * sampleRate) / fps),
     lengthSamples: Math.round((periodFrames * sampleRate) / fps),
     sampleRate,
+    frameRate: +fps.toFixed(4), // repère « frame » côté lecteur (diagnostic)
   };
 }
 
