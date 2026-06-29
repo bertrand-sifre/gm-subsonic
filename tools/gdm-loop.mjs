@@ -36,11 +36,14 @@
  *        convergente / gdm indisponible -> repli paramétrique côté serveur).
  *      - naturalLengthSeconds : DURÉE RÉELLE d'une piste FINIE (non-bouclante) en
  *        secondes, ou null. Le GBS n'expose AUCUNE durée native (ffprobe ->
- *        FALLBACK générique) ; on la déduit donc de l'instant de la DERNIÈRE
- *        écriture APU du log (les drivers GBS terminent un morceau par une frame
- *        de SILENCE — volumes à 0, DAC wave coupé — qui EST la dernière écriture,
- *        donc pas de queue à ajouter). null si la piste écrit encore en fin de
- *        fenêtre (bouclante/longue) -> on garde le FALLBACK côté importeur.
+ *        FALLBACK générique) ; on la déduit du DERNIER CHANGEMENT D'ÉTAT des
+ *        registres APU (analyzeFiniteEnd, signal partagé) — PAS de la dernière
+ *        écriture : beaucoup de drivers continuent d'écrire les mêmes valeurs idle
+ *        (silence : volume maître 0, canaux coupés) à CHAQUE frame jusqu'au bout
+ *        (ex. Tetris Game Boy piste 1 : écrit jusqu'à 200 s mais se tait à ~38.6 s),
+ *        ce qui rend « la dernière écriture » égale à la fin de fenêtre (fausse
+ *        durée « 2:00 »). null si l'état change encore en fin de fenêtre
+ *        (bouclante/longue) -> on garde le FALLBACK côté importeur.
  *
  * Usage CLI :  node tools/gdm-loop.mjs <source.gbs> <trackIndex>
  */
@@ -48,7 +51,7 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-import { analyzeStates } from './nsf-loop.mjs';
+import { analyzeStates, analyzeFiniteEnd } from './nsf-loop.mjs';
 
 const LEN_MS = 200000; // 200 s : couvre toute boucle <= ~100 s avec marge >= 1 période
 const RATE = 8000; // rendu rapide ; le compte de frames est rate-indépendant
@@ -86,10 +89,11 @@ function run(cmd, args, timeoutMs) {
  *            écritures ; capte la NOTE TENUE (invisible au delta), sert au raffinement
  *            seamless du loopStart.
  * Le compteur `frames=N` de l'en-tête lève l'ambiguïté du newline final de split.
- * On note aussi `lastWriteFrame` : l'index de la DERNIÈRE frame ayant des
- * écritures (ligne non vide), d'où la durée naturelle d'une piste finie.
+ * La durée d'une piste FINIE se déduit ensuite de `full` (dernier changement
+ * d'état, cf. analyzeFiniteEnd) — pas de l'index de dernière écriture, trompeur sur
+ * les drivers qui ré-écrivent le silence à chaque frame.
  *
- * @returns {{ delta: Int32Array, full: Int32Array, fps: number, lastWriteFrame: number } | null}
+ * @returns {{ delta: Int32Array, full: Int32Array, fps: number } | null}
  */
 function parseRegLog(stdout) {
   const lines = stdout.split('\n');
@@ -104,10 +108,8 @@ function parseRegLog(stdout) {
   const delta = new Int32Array(N);
   const full = new Int32Array(N);
   const reg = new Uint8Array(48); // état courant des 48 registres APU (FF10..FF3F)
-  let lastWriteFrame = -1; // dernière frame avec écriture (fin musicale d'une piste finie)
   for (let f = 0; f < N; f++) {
     const line = lines[1 + f] ?? ''; // frame sans écriture -> ligne vide
-    if (line.length > 0) lastWriteFrame = f;
     let dId = dIds.get(line);
     if (dId === undefined) { dId = dIds.size; dIds.set(line, dId); }
     delta[f] = dId;
@@ -121,7 +123,7 @@ function parseRegLog(stdout) {
     if (sId === undefined) { sId = sIds.size; sIds.set(key, sId); }
     full[f] = sId;
   }
-  return { delta, full, fps, lastWriteFrame };
+  return { delta, full, fps };
 }
 
 /**
@@ -156,7 +158,7 @@ export async function detectLoop({ sourcePath, trackIndex, gdm = 'gdm' }) {
 
   const parsed = parseRegLog(r.stdout);
   if (!parsed) return { loop: null, naturalLengthSeconds: null }; // en-tête absente / invalide
-  const { delta, full, fps, lastWriteFrame } = parsed;
+  const { delta, full, fps } = parsed;
 
   // Période + loopStart sur le delta (parité nsf-loop), en IGNORANT l'artefact d'init
   // de la frame 0 (sinon fausse intro d'1 frame sur les pistes qui bouclent dès 0) et
@@ -164,14 +166,12 @@ export async function detectLoop({ sourcePath, trackIndex, gdm = 'gdm' }) {
   // (sinon la note tenue à la frontière vient de l'intro).
   const loop = analyzeStates(delta, fps, { ignoreFirstFrameMismatch: true, refineStates: full });
 
-  // Durée naturelle d'une piste FINIE : l'instant de la dernière écriture APU. On
-  // ne la retient QUE si la piste a cessé d'écrire BIEN avant la fin de fenêtre
-  // (garde de 2 s) : sinon elle boucle/continue encore -> pas de fin franche, on
-  // laisse le FALLBACK. Inutile quand une boucle est trouvée (durée = loopEnd),
-  // mais émise quand même : c'est l'importeur qui choisit selon `loop`.
-  const tailGuardFrames = Math.round(2 * fps);
-  const finite = !loop && lastWriteFrame >= 0 && lastWriteFrame < delta.length - tailGuardFrames;
-  const naturalLengthSeconds = finite ? +(((lastWriteFrame + 1) / fps).toFixed(4)) : null;
+  // Durée naturelle d'une piste FINIE : le DERNIER changement d'état des registres
+  // (analyzeFiniteEnd sur `full`), pas la dernière écriture — les drivers GBS qui
+  // ré-écrivent le silence à chaque frame fausseraient la durée à la fin de fenêtre.
+  // Inutile quand une boucle est trouvée (durée = loopEnd) : on ne la calcule qu'à
+  // défaut de boucle. C'est l'importeur qui arbitre selon `loop`.
+  const naturalLengthSeconds = loop ? null : analyzeFiniteEnd(full, fps);
 
   if (process.env.VDM_GBS_LOOP_DEBUG) {
     process.stderr.write(

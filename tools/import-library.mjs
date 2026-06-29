@@ -60,7 +60,12 @@ const STEMS_CACHE_FILE = join(MEDIA_DIR, 'stems.cache.json');
 // Les valeurs sous les MÊMES clés `fichier#piste@mtime:size` ne sont plus comparables ;
 // le bump force une re-détection propre (le NES est re-détecté une fois à l'identique,
 // déterministe -> sans risque). Un cache de schéma inférieur est traité comme vide.
-const LOOP_CACHE_SCHEMA = 6;
+// Schéma 7 : la DURÉE RÉELLE d'une piste GBS finie se déduit désormais du DERNIER
+// CHANGEMENT D'ÉTAT des registres (analyzeFiniteEnd), et non de la dernière écriture
+// APU — qui restait à la fin de fenêtre sur les drivers ré-écrivant le silence chaque
+// frame (ex. Tetris Game Boy piste 1 : `naturalLengthSeconds` null -> fausse durée
+// 120 s « 2:00 », au lieu de ~38.6 s). Le bump force le recalcul des entrées GBS.
+const LOOP_CACHE_SCHEMA = 7;
 
 const FALLBACK_SECONDS = Number(process.env.VDM_FALLBACK_SECONDS ?? 120);
 const CONCURRENCY = 6;

@@ -214,6 +214,52 @@ export function analyzeStates(states, fps, opts = {}) {
 }
 
 /**
+ * Détecte la FIN d'une piste FINIE (non-bouclante) à partir de la suite des ÉTATS
+ * COMPLETS de registres par frame (un id par frame, frames d'état égal <=> même id).
+ *
+ * Pourquoi pas « la dernière écriture » : beaucoup de drivers ne RENDENT PAS LA MAIN
+ * en fin de morceau — ils continuent d'ÉCRIRE chaque frame les mêmes valeurs idle
+ * (silence : volume maître 0, canaux coupés) indéfiniment. La dernière écriture est
+ * alors la fin de fenêtre (fausse durée « 2:00 »), alors que la musique s'est tue
+ * bien avant. Ex. mesuré : Tetris Game Boy piste 1 écrit `…15ff` à CHAQUE frame
+ * jusqu'à 200 s, mais son ÉTAT ne change plus après ~38.6 s (≈ 0:40).
+ *
+ * On prend donc le DERNIER instant où l'état change réellement, à condition qu'il
+ * soit suivi d'une QUEUE CONSTANTE assez longue (>= tailGuard) — sinon la piste
+ * évolue encore en fin de fenêtre (bouclante/longue) : pas de fin franche -> null,
+ * on garde le repli paramétrique côté importeur.
+ *
+ * Hypothèse : la queue constante EST un silence (les drivers terminent par volumes à
+ * 0). Une piste figée sur une NOTE TENUE serait coupée à l'attaque de la tenue ; cas
+ * non observé sur le corpus GBS (terminaisons en silence franc).
+ *
+ * @param {Int32Array|number[]} fullStates  un id d'ÉTAT complet des registres par frame
+ * @param {number} fps                      frame-rate autoritaire (Hz)
+ * @param {object} [opts]                   tailGuardSec (défaut 2)
+ * @returns {number|null}  durée naturelle en secondes (à 1e-4), ou null (pas de fin franche)
+ */
+export function analyzeFiniteEnd(fullStates, fps, opts = {}) {
+  const { tailGuardSec = 2 } = opts;
+  const S = fullStates;
+  const N = S.length;
+  if (N === 0) return null;
+  const tailGuardFrames = Math.round(tailGuardSec * fps);
+
+  // Dernier instant où l'ÉTAT complet change (les frames d'après ne font que
+  // ré-écrire les mêmes valeurs -> même id -> pas de changement).
+  let lastChange = 0;
+  for (let f = 1; f < N; f++) if (S[f] !== S[f - 1]) lastChange = f;
+
+  // Queue constante trop courte : la piste change encore en fin de fenêtre
+  // (boucle/continue) -> pas de fin franche détectable.
+  if (lastChange >= N - tailGuardFrames) return null;
+
+  // Frames de contenu = 0..lastChange inclus (la frame lastChange porte l'écriture
+  // qui fige le silence) -> (lastChange + 1) frames.
+  return +(((lastChange + 1) / fps).toFixed(4));
+}
+
+/**
  * Détecte la boucle à partir du TEXTE d'un log de registres NES déjà rendu.
  * Exporté pour test/CLI hors nsftool. Wrapper mince autour d'analyzeStates au fps
  * NTSC NES (défauts d'opts = constantes historiques) -> comportement bit pour bit
