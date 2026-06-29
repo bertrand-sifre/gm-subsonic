@@ -12,6 +12,12 @@ export const ROOT = join(__dirname, '../../..');
 export const MEDIA_DIR = join(ROOT, 'media');
 export const LIBRARY_DIR = join(ROOT, 'library');
 export const CACHE_DIR = join(MEDIA_DIR, '_cache'); // OGG rendus à la demande
+/**
+ * SPA Svelte buildé (`vite build`). Servi par le serveur UNIQUEMENT s'il existe
+ * (image de production « tout-en-un ») ; absent en dev, où Vite sert le front et
+ * proxifie `/api`. cf. `http/routes.ts` (montage conditionnel + fallback SPA).
+ */
+export const WEB_DIR = join(ROOT, 'apps/web/dist');
 
 export const PORT = Number(process.env.PORT ?? 8787);
 

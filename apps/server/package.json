@@ -7,6 +7,7 @@
     "@hono/node-server": "^1.13.1",
     "@vdm/shared": "*",
     "hono": "^4.6.3",
-    "music-metadata": "^10.5.0"
+    "music-metadata": "^10.5.0",
+    "tsx": "^4.19.1"
   }
 }

@@ -23,6 +23,26 @@
       "options": {
         "command": "tsc -p apps/server/tsconfig.json --noEmit"
       }
+    },
+    "container": {
+      "executor": "@nx-tools/nx-container:build",
+      "options": {
+        "engine": "docker",
+        "context": ".",
+        "file": "Dockerfile.prod",
+        "platforms": ["linux/amd64"],
+        "metadata": {
+          "images": ["ghcr.io/bertrand-sifre/gm-subsonic"],
+          "tags": [
+            "type=ref,event=branch",
+            "type=ref,event=pr",
+            "type=ref,event=tag",
+            "type=semver,pattern={{version}}",
+            "type=sha,prefix=sha-",
+            "type=raw,value=latest,enable={{is_default_branch}}"
+          ]
+        }
+      }
     }
   }
 }

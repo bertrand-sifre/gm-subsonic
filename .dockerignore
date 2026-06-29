@@ -15,3 +15,16 @@ tools/gdm/build
 # Fixtures générées (régénérées dans le conteneur via `npm run fixtures`).
 media/*.wav
 media/*.ogg
+
+# Données générées / volumes (image de PROD : Dockerfile.prod n'embarque que
+# media/meta.json ; le reste est régénéré au runtime ou monté en volume).
+media/_cache
+media/_decoded
+media/_stems
+media/*.generated.json
+media/loops.cache.json
+media/stems.cache.json
+# Sources VGM de l'utilisateur : montées en volume, jamais dans l'image.
+library/*
+!library/.gitkeep
+!library/README.md

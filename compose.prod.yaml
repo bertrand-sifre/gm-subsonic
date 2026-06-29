@@ -1,0 +1,32 @@
+# Déploiement de PRODUCTION (image construite par Dockerfile.prod).
+# Un seul service « tout-en-un » : le serveur Hono sert le SPA buildé + l'API
+# /api + l'API Subsonic /rest sur le port 8787.
+#
+#   docker compose -f compose.prod.yaml up --build      # build + lancement
+#   #   web + API : http://localhost:8787
+#   #   clients Subsonic (Symfonium/Feishin/DSub) : http://localhost:8787
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    image: ghcr.io/bertrand-sifre/gm-subsonic:latest
+    ports:
+      - "8787:8787"
+    volumes:
+      # Sources VGM (NSF/GBS/SPC/…) déposées par l'utilisateur. Lecture seule :
+      # l'import ne fait que les décoder (il écrit dans media/).
+      - ./library:/app/library:ro
+      # Catalogue généré (library.generated.json, caches de boucle/stems) + cache
+      # OGG rendu à la demande (_cache/) : données persistantes.
+      - vdm_media:/app/media
+    environment:
+      - NODE_ENV=production
+      - PORT=8787
+      # - VDM_SKIP_IMPORT=1   # ne pas réimporter la bibliothèque au démarrage
+      # - VDM_GBS_LOOP=0      # désactiver la détection de boucle GBS
+    restart: unless-stopped
+    init: true
+
+volumes:
+  vdm_media:

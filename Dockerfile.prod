@@ -1,0 +1,123 @@
+# Image de PRODUCTION « tout-en-un » : un seul conteneur où le serveur Hono sert
+# le SPA Svelte buildé (apps/web/dist) ET l'API /api + /rest (Subsonic), sur le
+# port 8787. À comparer au `Dockerfile` (DEV : code en bind-mount, npm run dev).
+#
+# Pipeline multi-stage :
+#   nsfbuilder  -> binaire nsftool (cœur xgm de nsfplay)        [identique au DEV]
+#   gdmbuilder  -> binaire gdm (libgme PATCHÉE, liée statique)  [identique au DEV]
+#   webbuilder  -> apps/web/dist (vite build via nx)
+#   <final>     -> node:20 + ffmpeg + binaires + deps PROD (tsx) + code + dist
+
+# --- Stage builder : compile nsftool sur le cœur portable de nsfplay ----------
+FROM debian:bookworm-slim AS nsfbuilder
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+# TODO repro : épingler un commit précis de nsfplay plutôt que la branche par défaut.
+RUN git clone --depth 1 https://github.com/bbbradsmith/nsfplay nsfplay
+COPY tools/nsftool/nsftool.cpp nsfplay/contrib/nsftool.cpp
+RUN cd nsfplay/contrib \
+ && make release \
+ && g++ -O2 -std=c++17 -Wall -Wno-deprecated-declarations \
+      -o /nsftool nsftool.cpp libnsfplay.a -lm
+
+# --- Stage builder : compile libgme PATCHÉE (from-source) puis gdm ------------
+# Détails de la stratégie (patch reglog, lien statique, licences) : voir Dockerfile.
+FROM debian:bookworm-slim AS gdmbuilder
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential cmake pkg-config git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+# libgme PATCHÉE, from-source, SHA ÉPINGLÉ (libgme 0.6.4).
+ARG LIBGME_SHA=f0d9517c5c3e0b712f553baa62e213336587d52e
+RUN git clone https://github.com/libgme/game-music-emu libgme \
+ && git -C libgme checkout ${LIBGME_SHA}
+COPY tools/gdm/patches/libgme-reglog.patch ./
+RUN git -C libgme apply --check ../libgme-reglog.patch \
+ && git -C libgme apply ../libgme-reglog.patch
+RUN cmake -S libgme -B libgme/build -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_SHARED_LIBS=OFF -DGME_BUILD_SHARED=OFF -DGME_BUILD_STATIC=ON \
+      -DGME_BUILD_EXAMPLES=OFF -DGME_BUILD_TESTING=OFF -DGME_ZLIB=OFF \
+      -DCMAKE_INSTALL_PREFIX=/usr/local \
+ && cmake --build libgme/build -j \
+ && cmake --install libgme/build
+COPY tools/gdm/CMakeLists.txt tools/gdm/gdm.cpp tools/gdm/wav.h ./gdm/
+RUN cmake -S gdm -B gdm/build -DCMAKE_BUILD_TYPE=Release \
+ && cmake --build gdm/build --target gdm -j
+
+# --- Stage builder : build du front Svelte (vite build via nx) ----------------
+# Toolchain JS COMPLÈTE (nx/vite/svelte) ; ne produit que apps/web/dist, copié
+# dans l'image finale. Aucun de ces paquets ne reste en prod.
+FROM node:20-bookworm-slim AS webbuilder
+ENV NX_DAEMON=false NPM_CONFIG_FUND=false NPM_CONFIG_AUDIT=false
+WORKDIR /build
+# Manifestes d'abord (couche cache : `npm ci` ne se rejoue que si le lock change).
+COPY package.json package-lock.json ./
+COPY apps/server/package.json apps/server/
+COPY apps/web/package.json apps/web/
+COPY libs/shared/package.json libs/shared/
+RUN npm ci
+# Sources + config Nx, puis build du seul projet web.
+COPY nx.json tsconfig.base.json ./
+COPY apps apps
+COPY libs libs
+RUN npx nx build web
+
+# --- Image finale : runtime PROD lean -----------------------------------------
+FROM node:20-bookworm-slim
+ENV NODE_ENV=production \
+    NX_DAEMON=false \
+    NPM_CONFIG_FUND=false \
+    NPM_CONFIG_AUDIT=false \
+    PORT=8787
+
+# ffmpeg (libvorbis) pour rendu/transcodage ; ca-certificates pour npm HTTPS ;
+# tini comme PID 1 (signaux propres + reaping des process ffmpeg/gdm/nsftool).
+# libgme0 STOCK est tiré transitivement par ffmpeg (ffprobe `-f libgme`) ; il
+# reste séparé de la libgme patchée confinée en STATIQUE dans le binaire gdm.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg ca-certificates tini \
+ && rm -rf /var/lib/apt/lists/*
+
+# Binaires natifs (mêmes stages que l'image DEV), résolus par nom dans le PATH
+# côté serveur (VDM_NSFPLAY / VDM_GDM, défauts 'nsftool'/'gdm').
+COPY --from=nsfbuilder /nsftool /usr/local/bin/nsftool
+COPY --from=gdmbuilder /build/gdm/build/gdm /usr/local/bin/gdm
+
+WORKDIR /app
+
+# 1) Dépendances de PRODUCTION (couche cache-friendly). `--omit=dev` retire
+#    nx/vite/svelte/typescript ; tsx EST conservé car déclaré en `dependencies`
+#    de @vdm/server (le serveur s'exécute via tsx, sans build JS préalable).
+COPY package.json package-lock.json ./
+COPY apps/server/package.json apps/server/
+COPY apps/web/package.json apps/web/
+COPY libs/shared/package.json libs/shared/
+RUN npm ci --omit=dev
+
+# 2) Code applicatif (source TS lue à la volée par tsx) + lib partagée + outils
+#    d'import (import-library.mjs et ses détecteurs de boucle, node pur).
+COPY tsconfig.base.json ./
+COPY apps/server/tsconfig.json apps/server/
+COPY apps/server/src apps/server/src
+COPY libs/shared libs/shared
+COPY tools tools
+
+# 3) SPA buildé : servi à la racine par le serveur (cf. http/routes.ts).
+COPY --from=webbuilder /build/apps/web/dist apps/web/dist
+
+# 4) Manifeste statique minimal (l'entrypoint le (re)crée si le volume est vide).
+COPY media/meta.json media/meta.json
+
+# 5) Entrypoint : prépare les dossiers de données, importe la bibliothèque, lance.
+COPY docker-entrypoint.sh ./
+RUN chmod +x docker-entrypoint.sh
+
+EXPOSE 8787
+
+# media/ (catalogue généré + cache OGG rendu à la demande) et library/ (sources
+# VGM déposées par l'utilisateur) sont des données persistantes -> volumes.
+VOLUME ["/app/media", "/app/library"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/docker-entrypoint.sh"]
