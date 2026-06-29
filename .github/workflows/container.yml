@@ -55,7 +55,9 @@ jobs:
             --cache-from=type=gha \
             --cache-to=type=gha,mode=max
         env:
-          # Le moteur de metadata de nx-container (génération des tags OCI) lit
-          # GITHUB_TOKEN. On y passe le token AUTO-FOURNI par Actions — pas besoin
-          # d'un PAT/secret dédié. `github.token` == `secrets.GITHUB_TOKEN`.
-          GITHUB_TOKEN: ${{ github.token }}
+          # Le moteur de metadata de nx-container lit le token via
+          # core.getInput('github-token') -> env INPUT_GITHUB_TOKEN (et NON
+          # GITHUB_TOKEN). Il sert à lire les infos du repo (labels OCI +
+          # branche par défaut pour {{is_default_branch}}). On y passe le token
+          # AUTO-FOURNI par Actions — pas besoin d'un PAT/secret dédié.
+          INPUT_GITHUB_TOKEN: ${{ github.token }}
