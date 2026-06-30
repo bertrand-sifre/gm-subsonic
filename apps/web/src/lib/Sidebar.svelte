@@ -3,7 +3,7 @@
    * Barre latérale gauche : logo, recherche, navigation principale.
    */
   import type { IconName } from './Icon.svelte';
-  import { view, search, favorites, historyIds, navigate, type ViewName } from './player';
+  import { view, search, favorites, historyIds, navigate, settingsOpen, type ViewName } from './player';
   import Icon from './Icon.svelte';
 
   const NAV: { id: ViewName; label: string; icon: IconName }[] = [
@@ -42,6 +42,11 @@
   </nav>
 
   <div class="spacer"></div>
+
+  <button class="nav-item settings" on:click={() => settingsOpen.set(true)}>
+    <Icon name="settings" size={18} />
+    <span>Paramètres</span>
+  </button>
 </aside>
 
 <style>

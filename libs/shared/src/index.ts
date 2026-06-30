@@ -91,6 +91,52 @@ export interface Library {
   games: GameGroup[];
 }
 
+/**
+ * Compte rendu d'un import (catalogage du dossier `library/` → manifeste), qu'il
+ * soit déclenché à la main, par la surveillance du dossier ou au démarrage.
+ */
+export interface ImportRecord {
+  /** Horodatage de fin (epoch ms). */
+  at: number;
+  ok: boolean;
+  /** Durée de l'import + re-scan (ms). */
+  durationMs: number;
+  /** Origine du déclenchement. */
+  trigger: 'manual' | 'watch' | 'startup';
+  /** Ligne de récapitulatif du catalogue (morceaux/boucles/stems), si disponible. */
+  summary?: string;
+  /** Message d'erreur si `ok === false`. */
+  error?: string;
+}
+
+/**
+ * État de la bibliothèque côté serveur : surveillance du dossier `library/`,
+ * import en cours, volumétrie et dernier import. Exposé par `/api/library/status`.
+ */
+export interface LibraryStatus {
+  /** Le dossier `library/` est-il surveillé (auto-import à chaque changement) ? */
+  watching: boolean;
+  /** Période de scrutation du dossier (ms) — surveillance par polling (bind-mount). */
+  watchInterval: number;
+  /** Un import/re-scan est-il en cours ? */
+  importing: boolean;
+  /** Nombre de jeux dans la bibliothèque courante. */
+  games: number;
+  /** Nombre de morceaux dans la bibliothèque courante. */
+  tracks: number;
+  /** Dernier import effectué (null si aucun depuis le démarrage). */
+  lastImport: ImportRecord | null;
+}
+
+/**
+ * Résultat d'un dépôt de fichiers (upload vers `library/`) : noms acceptés (écrits
+ * puis catalogués) et rejetés (extension non gérée, nom invalide, trop volumineux…).
+ */
+export interface UploadOutcome {
+  accepted: string[];
+  rejected: { name: string; reason: string }[];
+}
+
 /** Comportements de lecture proposés à l'utilisateur. */
 export type PlaybackMode =
   | 'once' // lecture normale, du début à la fin

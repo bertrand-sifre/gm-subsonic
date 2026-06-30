@@ -9,6 +9,7 @@
     view, search, selectedGame, selectedConsole, library, favorites, historyIds,
     openGame, openConsole, navigate, platformList, gamesOfPlatform,
     composerCounts, searchTracks, trackById,
+    libraryStatus, importError, importOpen,
   } from './player';
   import { coverGradient, initials } from './cover';
   import Icon from './Icon.svelte';
@@ -17,9 +18,12 @@
 
   $: games = $library?.games ?? [];
   $: searching = $search.trim().length > 0;
-  $: results = searching ? searchTracks($search) : [];
+  // `$library ?` rend ces vues réactives au rechargement live (poll/import) : sans cette
+  // dépendance, `searchTracks`/`trackById` lisent `get(library)` (NON réactif) et les
+  // résultats/l'historique resteraient périmés (piège réactivité Svelte 4, cf. apps/web/CLAUDE.md).
+  $: results = $library && searching ? searchTracks($search) : [];
   $: favTracks = games.flatMap((g) => g.tracks).filter((t) => $favorites.has(t.id));
-  $: histTracks = $historyIds.map((id) => trackById(id)).filter((t): t is Track => !!t);
+  $: histTracks = $library ? $historyIds.map((id) => trackById(id)).filter((t): t is Track => !!t) : [];
   $: composers = $library ? composerCounts() : [];
   $: consoles = $library ? platformList() : [];
   $: consoleGames = $selectedConsole ? gamesOfPlatform($selectedConsole) : [];
@@ -62,7 +66,26 @@
     {:else}
       <!-- Liste des consoles (vue par défaut de la Bibliothèque) -->
       <section class="view-pad">
-        <h2 class="vh">Bibliothèque</h2>
+        <div class="vhead">
+          <h2 class="vh">Bibliothèque</h2>
+          <div class="lib-actions">
+            {#if $libraryStatus?.watching}
+              <span class="watch-pill" title="Surveillance du dossier library/ active">
+                <Icon name="eye" size={13} /> Surveillé
+              </span>
+            {/if}
+            <button
+              type="button"
+              class="import-btn"
+              title="Déposer des fichiers à importer"
+              on:click={() => importOpen.set(true)}
+            >
+              <span class="ico"><Icon name="upload" size={15} /></span>
+              Importer
+            </button>
+          </div>
+        </div>
+        {#if $importError}<p class="import-err">{$importError}</p>{/if}
         <div class="grid">
           {#each consoles as c}
             <button class="card console-card" on:click={() => openConsole(c.platform)}>
@@ -135,6 +158,41 @@
 
   .vh { margin: 0; font-size: 24px; font-weight: 800; }
   .sh { margin: 8px 0 0; font-size: 16px; font-weight: 700; color: var(--text); }
+
+  .vhead {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .lib-actions { display: flex; align-items: center; gap: 10px; }
+  .watch-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 10px;
+    border-radius: var(--r-pill);
+    background: var(--accent-soft);
+    color: var(--accent-strong);
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .import-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 9px 16px;
+    border-radius: var(--r-pill);
+    background: var(--accent-grad);
+    color: #fff;
+    font-weight: 600;
+    font-size: 13px;
+    box-shadow: 0 4px 14px rgba(124, 92, 255, 0.35);
+  }
+  .import-btn:hover { filter: brightness(1.08); }
+  .ico { display: inline-flex; }
+  .import-err { margin: 0; color: var(--danger, #ff6b6b); font-size: 13px; }
 
   .grid {
     display: grid;

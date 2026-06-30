@@ -11,6 +11,7 @@ import { mkdir } from 'node:fs/promises';
 import { serve } from '@hono/node-server';
 import { CACHE_DIR, LIBRARY_DIR, MEDIA_DIR, PORT } from './config.js';
 import { createApp } from './http/routes.js';
+import { LibraryManager } from './library/manager.js';
 import { scanLibrary } from './library/scan.js';
 
 async function main() {
@@ -19,7 +20,13 @@ async function main() {
   const count = scan.files.size + scan.renders.size;
   console.log(`[vdm] bibliothèque chargée : ${count} morceau(x), ${scan.library.games.length} jeu(x)`);
 
-  const app = createApp(scan);
+  // Gestionnaire vivant : détient le scan courant, sait ré-importer/re-scanner et
+  // surveiller le dossier `library/`. `init()` restaure la surveillance persistée.
+  const manager = new LibraryManager(scan);
+  await manager.init();
+  if (manager.watching) console.log(`[vdm] surveillance du dossier ${LIBRARY_DIR} active`);
+
+  const app = createApp(manager);
   serve({ fetch: app.fetch, port: PORT }, ({ port }) => {
     console.log(`[vdm] serveur en écoute sur http://localhost:${port}`);
   });

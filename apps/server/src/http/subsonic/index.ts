@@ -13,7 +13,7 @@
  */
 
 import type { Hono } from 'hono';
-import type { ScanResult } from '../../library/types.js';
+import type { LibraryManager } from '../../library/manager.js';
 import { buildCatalog } from './catalog.js';
 import { ERR } from './errors.js';
 import { failed } from './respond.js';
@@ -33,8 +33,23 @@ const VERBS: VerbMap = {
   ...favoriteVerbs,
 };
 
-export function mountSubsonic(app: Hono, scan: ScanResult): void {
-  const deps: VerbDeps = { scan, catalog: buildCatalog(scan) };
+export function mountSubsonic(app: Hono, manager: LibraryManager): void {
+  // Le catalogue (adaptateur jeu→album/compositeur→artiste) est reconstruit à chaque
+  // import. `deps` lit le scan ET le catalogue VIVANTS via des accesseurs : les
+  // handlers (qui déstructurent `{ scan }`/`{ catalog }` à l'appel) voient toujours
+  // l'état courant après un re-scan, sans re-monter le dispatcher.
+  let catalog = buildCatalog(manager.current);
+  manager.onChange((scan) => {
+    catalog = buildCatalog(scan);
+  });
+  const deps: VerbDeps = {
+    get scan() {
+      return manager.current;
+    },
+    get catalog() {
+      return catalog;
+    },
+  };
 
   // Dispatcher unique : strip `.view`, lookup déclaratif, contrôle des params
   // requis, puis délégation au handler du verbe. Verbe inconnu -> erreur propre.

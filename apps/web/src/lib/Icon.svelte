@@ -10,13 +10,14 @@
     | 'play' | 'pause' | 'skip-back' | 'skip-forward' | 'shuffle'
     | 'repeat' | 'repeat-1' | 'infinity'
     | 'volume' | 'volume-low' | 'volume-mute' | 'queue' | 'more' | 'settings'
-    | 'download' | 'chevron-right' | 'chevron-down' | 'music' | 'plus' | 'check';
+    | 'download' | 'chevron-right' | 'chevron-down' | 'music' | 'plus' | 'check' | 'x'
+    | 'refresh' | 'eye' | 'folder' | 'upload';
 
   const STROKE = new Set<IconName>([
     'home','library','compass','sliders','gamepad','users','heart','clock','search',
     'skip-back','skip-forward','shuffle','repeat','repeat-1','infinity','volume',
     'volume-low','volume-mute','queue','more','settings','download','chevron-right',
-    'chevron-down','music','plus','check',
+    'chevron-down','music','plus','check','x','refresh','eye','folder','upload',
   ]);
 
   const PATHS: Record<IconName, string> = {
@@ -50,6 +51,11 @@
     music: '<circle cx="7" cy="18" r="2.5"/><circle cx="17" cy="16" r="2.5"/><path d="M9.5 18V6l10-2v10"/>',
     plus: '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
     check: '<path d="m5 12.5 4.5 4.5L19 7"/>',
+    x: '<line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/>',
+    refresh: '<path d="M21 4v5h-5"/><path d="M3 20v-5h5"/><path d="M19.5 9A8 8 0 0 0 6 6.3L3 9"/><path d="M4.5 15A8 8 0 0 0 18 17.7L21 15"/>',
+    eye: '<path d="M1.5 12S5.5 5 12 5s10.5 7 10.5 7-4 7-10.5 7S1.5 12 1.5 12Z"/><circle cx="12" cy="12" r="3"/>',
+    folder: '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>',
+    upload: '<path d="M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/><path d="m8 8 4-4 4 4"/><path d="M12 4v12"/>',
   };
 
   export const ICON_NAMES = Object.keys(PATHS) as IconName[];

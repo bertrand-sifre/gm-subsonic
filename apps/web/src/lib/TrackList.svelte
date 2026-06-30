@@ -37,6 +37,10 @@
     }
   }
 
+  // Durée de la queue (fin) après la boucle ; négligeable en deçà de 50 ms.
+  function tailDur(t: Track): number {
+    return t.loop ? t.duration - t.loop.loopEnd : 0;
+  }
   function loopPoint(t: Track): string {
     return t.loop ? fmt(t.loop.loopStart) : '—';
   }
@@ -44,11 +48,7 @@
     return t.loop ? fmt(t.loop.loopEnd - t.loop.loopStart) : '—';
   }
   function tailLen(t: Track): string {
-    if (t.loop) {
-      const tail = t.duration - t.loop.loopEnd;
-      return tail > 0.05 ? fmt(tail) : '—';
-    }
-    return t.render ? `${t.render.defaultFade}s` : '—';
+    return t.loop ? fmt(tailDur(t)) : '—';
   }
 </script>
 
@@ -58,7 +58,7 @@
     <span class="c-title">Titre</span>
     {#if showGame}<span class="c-game">Jeu</span>{/if}
     <span class="c-dur">Durée</span>
-    <span class="c-loop">Boucle</span>
+    <span class="c-loop">Information</span>
     <span class="c-chan">Canaux</span>
     <span class="c-fav"></span>
   </div>
@@ -105,9 +105,13 @@
       <span class="c-loop">
         {#if track.loop}
           <span class="loop-cell">
-            <span class="seg-tag intro">Intro <b>{loopPoint(track)}</b></span>
-            <span class="seg-tag loop">Loop <b>{loopLen(track)}</b></span>
-            <span class="seg-tag fade">Fin <b>{tailLen(track)}</b></span>
+            {#if track.loop.loopStart > 0.05}
+              <span class="seg-tag intro">Intro <b>{loopPoint(track)}</b></span>
+            {/if}
+            <span class="seg-tag loop">Boucle <b>{loopLen(track)}</b></span>
+            {#if tailDur(track) > 0.05}
+              <span class="seg-tag fade">Fin <b>{tailLen(track)}</b></span>
+            {/if}
           </span>
         {:else}
           <span class="muted">piste finie</span>

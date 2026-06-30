@@ -8,8 +8,8 @@
  */
 
 import { derived, get, writable } from 'svelte/store';
-import type { Library, PlaybackMode, PlaybackOptions, Track } from '@vdm/shared';
-import { fetchLibrary } from './api';
+import type { Library, LibraryStatus, PlaybackMode, PlaybackOptions, Track, UploadOutcome } from '@vdm/shared';
+import { fetchLibrary, fetchLibraryStatus, setWatch, triggerImport, uploadFiles } from './api';
 import { LoopPlayer, type Progress } from './LoopPlayer';
 
 export type Status = 'stopped' | 'loading' | 'playing' | 'paused';
@@ -33,6 +33,23 @@ export const selectedGame = writable<string | null>(null);
 /** Console (plateforme) sélectionnée dans la vue Bibliothèque (console → jeux → détail). */
 export const selectedConsole = writable<string | null>(null);
 export const search = writable<string>('');
+/** Ouverture du panneau « Paramètres » (modal). */
+export const settingsOpen = writable<boolean>(false);
+
+// --- Stores : gestion de bibliothèque (import / surveillance) ----------------
+
+/** État serveur : surveillance, import en cours, dernier import, volumétrie. */
+export const libraryStatus = writable<LibraryStatus | null>(null);
+/** Un import déclenché depuis le web est-il en cours (spinner du bouton) ? */
+export const importing = writable<boolean>(false);
+/** Dernier message d'erreur d'IMPORT/dépôt (en-tête Bibliothèque ; vidé au succès). */
+export const importError = writable<string>('');
+/** Erreur du toggle de SURVEILLANCE (affichée dans les Paramètres ; vidée au succès). */
+export const watchError = writable<string>('');
+/** Ouverture de la modale de dépôt de fichiers (« Importer »). */
+export const importOpen = writable<boolean>(false);
+/** Résultat du dernier dépôt (fichiers acceptés / rejetés), pour l'affichage. */
+export const uploadResult = writable<UploadOutcome | null>(null);
 
 // --- Stores : lecture --------------------------------------------------------
 
@@ -152,6 +169,88 @@ export async function initLibrary(): Promise<void> {
     // Vue Bibliothèque par défaut = liste des consoles (pas de jeu présélectionné).
   } catch (e) {
     loadError.set(String(e));
+  }
+  // État de gestion + scrutation périodique (rend visible l'auto-import par surveillance).
+  void refreshLibraryStatus();
+  startStatusPolling();
+}
+
+// --- Actions : gestion de bibliothèque (import / surveillance) ---------------
+
+/** Horodatage du dernier import déjà répercuté côté web (anti double-rafraîchissement). */
+let lastSeenImportAt = 0;
+const STATUS_POLL_MS = 5000;
+let statusTimer: ReturnType<typeof setInterval> | 0 = 0;
+
+/** Lit l'état serveur ; si un import (manuel ou surveillance) a eu lieu, recharge la bibliothèque. */
+export async function refreshLibraryStatus(): Promise<void> {
+  try {
+    const st = await fetchLibraryStatus();
+    libraryStatus.set(st);
+    const at = st.lastImport?.at ?? 0;
+    if (at > lastSeenImportAt) {
+      lastSeenImportAt = at;
+      library.set(await fetchLibrary());
+    }
+  } catch {
+    /* hors-ligne / transitoire : on réessaiera au prochain tick */
+  }
+}
+
+/** Scrutation périodique de l'état (en pause si l'onglet est masqué). */
+function startStatusPolling(): void {
+  if (statusTimer) return;
+  statusTimer = setInterval(() => {
+    if (typeof document !== 'undefined' && document.hidden) return;
+    void refreshLibraryStatus();
+  }, STATUS_POLL_MS);
+}
+
+/** Déclenche un import + re-scan côté serveur et met à jour la bibliothèque en place. */
+export async function importLibrary(): Promise<void> {
+  if (get(importing)) return;
+  importing.set(true);
+  importError.set('');
+  try {
+    const { status, library: lib, lastImport } = await triggerImport();
+    library.set(lib);
+    libraryStatus.set(status);
+    lastSeenImportAt = lastImport?.at ?? lastSeenImportAt;
+    if (lastImport && !lastImport.ok) importError.set(lastImport.error ?? 'Import en échec.');
+  } catch (e) {
+    importError.set(String(e));
+  } finally {
+    importing.set(false);
+  }
+}
+
+/** Dépose des fichiers dans `library/` (upload), les importe et met à jour la bibliothèque. */
+export async function uploadLibraryFiles(files: File[]): Promise<void> {
+  if (!files.length || get(importing)) return;
+  importing.set(true);
+  importError.set('');
+  uploadResult.set(null);
+  try {
+    const { status, library: lib, lastImport, accepted, rejected } = await uploadFiles(files);
+    library.set(lib);
+    libraryStatus.set(status);
+    lastSeenImportAt = lastImport?.at ?? lastSeenImportAt;
+    uploadResult.set({ accepted, rejected });
+    if (lastImport && !lastImport.ok) importError.set(lastImport.error ?? 'Import en échec.');
+  } catch (e) {
+    importError.set(String(e));
+  } finally {
+    importing.set(false);
+  }
+}
+
+/** Active/désactive la surveillance du dossier `library/` (persistée côté serveur). */
+export async function setWatchLibrary(enabled: boolean): Promise<void> {
+  watchError.set('');
+  try {
+    libraryStatus.set(await setWatch(enabled));
+  } catch (e) {
+    watchError.set(String(e));
   }
 }
 

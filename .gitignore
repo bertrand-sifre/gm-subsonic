@@ -25,6 +25,9 @@ media/library.generated.json
 media/loops.cache.json
 media/stems.cache.json
 
+# Réglages applicatifs runtime (toggle de surveillance) — état local, non versionné.
+media/app-settings.json
+
 # Script de spike (prototype de détection de boucle, non versionné).
 /_spike_loop.cjs
 

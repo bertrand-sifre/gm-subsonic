@@ -11,6 +11,8 @@ Types TypeScript partagés entre le serveur et le client web. Un seul fichier so
 - `GameGroup` / `Library` — morceaux regroupés par jeu (organisation produit centrale).
 - `PlaybackMode` — `'once' | 'loopInfinite' | 'loopCount' | 'loopCountFade'`.
 - `PlaybackOptions` — `{ mode, loopCount, fadeSeconds }`.
+- `LibraryStatus` / `ImportRecord` — état de gestion de bibliothèque (surveillance du
+  dossier `library/`, import en cours, dernier import). Exposé par `/api/library/status`.
 
 ## Convention : paquet « source only »
 

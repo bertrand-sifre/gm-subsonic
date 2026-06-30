@@ -25,7 +25,16 @@ UI inspirée des lecteurs de streaming (Spotify/SoundCloud) : coquille 3 colonne
   métadonnées absentes du backend (pas de jaquette). `src/lib/format.ts` — fmt temps.
 - `src/theme.css` — **tokens de design globaux** (couleurs/rayons/dimensions) ; tout
   composant s'y réfère via `var(--…)`, pas de couleurs en dur.
-- `src/lib/api.ts` — `fetchLibrary()` (appel `/api/library`).
+- `src/lib/api.ts` — `fetchLibrary()` + gestion : `fetchLibraryStatus()`, `triggerImport()`,
+  `uploadFiles()`, `setWatch()` (endpoints `/api/library/status|import|upload|watch`).
+- **Gestion de bibliothèque** : `Settings.svelte` expose le toggle « Surveiller le dossier ». Le
+  bouton **Importer** de l'en-tête Bibliothèque (`CenterView`) ouvre `ImportDialog.svelte`, une
+  modale de DÉPÔT de fichiers (glisser-déposer ou sélection) qui les téléverse dans `library/` ;
+  le serveur les catalogue puis renvoie la bibliothèque fraîche (acceptés / rejetés affichés). Le
+  store (`libraryStatus`/`importing`/`importError`/`importOpen`/`uploadResult` + actions
+  `uploadLibraryFiles`, `importLibrary`, `setWatchLibrary`, `refreshLibraryStatus`) scrute
+  `/api/library/status` (5 s, en pause si onglet masqué) et recharge la bibliothèque quand un
+  import (dépôt, manuel ou surveillance) survient.
 - `src/main.ts` — montage de l'app (importe `theme.css`).
 
 > ⚠️ **Pièges réactivité Svelte 4** : un `$: x = f()` où `f` lit des stores/vars NON

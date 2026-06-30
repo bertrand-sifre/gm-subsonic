@@ -9,8 +9,17 @@ API du serveur (Hono + @hono/node-server). Deux responsabilités pour le MVP :
 `src/main.ts` n'est qu'un **bootstrap** (~30 l.) : prépare le cache, scanne, monte l'app,
 écoute. La logique vit dans des modules dédiés :
 
-- `config.ts` — chemins, port, garde-fous de rendu, `SAMPLE_RATE`, binaire `nsftool`, types MIME.
-- `http/routes.ts` — `createApp(scan)` : routes `/api/*` (fines) + montage de l'API Subsonic.
+- `config.ts` — chemins, port, garde-fous de rendu, `SAMPLE_RATE`, binaire `nsftool`, types MIME,
+  + surveillance (`WATCH_INTERVAL_MS`, `WATCH_DEFAULT`, `SOURCE_EXTENSIONS`, `IMPORT_SCRIPT`, `SETTINGS_FILE`).
+- `settings.ts` — réglages applicatifs PERSISTÉS (`media/app-settings.json`) ; pour l'instant le
+  seul toggle de surveillance du dossier `library/`.
+- `library/manager.ts` — `LibraryManager` : détient le `ScanResult` VIVANT (`current`), sait le
+  reconstruire (`rescan` = import + re-scan, SÉRIALISÉ, swap atomique + `onChange`) et surveiller
+  `library/` (`setWatching`, persisté). `library/watcher.ts` — surveillance PAR SCRUTATION (polling,
+  anti-rebond) car inotify ne traverse pas les bind-mounts Docker. `library/import.ts` — spawn de
+  `tools/import-library.mjs`. `library/upload.ts` — écriture des fichiers DÉPOSÉS (upload) dans
+  `library/` : nom assaini (basename → pas de traversée), extension/taille validées (`rejected`).
+- `http/routes.ts` — `createApp(manager)` : routes `/api/*` (fines) + montage de l'API Subsonic.
 - `http/serve-file.ts` — `serveFile` + parsing **Range** (RFC 7233).
 - `http/subsonic/` — API **Subsonic** minimale sur `/rest/*` (cf. section dédiée plus bas).
 - `stream.ts` — `resolveStream(scan, id, …)` : résolution id → fichier servable, **partagée**
@@ -46,10 +55,20 @@ au lieu du FALLBACK 120 s. Les voix DMG-APU étant **statiques**, elles sont exp
 | Méthode | Route | Rôle |
 |---|---|---|
 | GET | `/api/health` | `{ ok: true }` |
-| GET | `/api/library` | bibliothèque regroupée par jeu (`Library` de `@vdm/shared`) |
+| GET | `/api/library` | bibliothèque regroupée par jeu (`Library` de `@vdm/shared`) — lue à chaud (`manager.current`) |
+| GET | `/api/library/status` | `LibraryStatus` : surveillance, import en cours, dernier import, volumétrie |
+| POST | `/api/library/import` | import + re-scan ; renvoie `{ status, library, lastImport }` |
+| POST | `/api/library/upload` | dépôt multipart (champ `files`) → écrits dans `library/` puis importés ; `{ …, accepted, rejected }` |
+| PUT | `/api/library/watch` | corps `{ enabled: boolean }` : (dé)active + PERSISTE la surveillance |
 | GET | `/api/stream/:id` | streaming audio, Range/206, `Accept-Ranges`, `Content-Range` |
 | GET | `/api/stream/:id/channel/:chan` | stem d'une voix (rendu à la demande), 404 → repli mix |
 | GET | `/rest/:verb(.view)` | API **Subsonic** (browse + play) — cf. section dédiée |
+
+**Surveillance & import** : le dossier `library/` (dépôt des sources NSF/GBS/SPC…) peut être
+*surveillé* (toggle Paramètres, persisté) ; tout changement relance `import-library.mjs` puis un
+re-scan en mémoire (catalogue Subsonic reconstruit via `manager.onChange`), sans redémarrage.
+Surveillance par **scrutation** (`fs.watch`/inotify non fiable en bind-mount Docker), période
+`VDM_WATCH_INTERVAL` (ms, défaut 3000) ; activée au boot si `VDM_WATCH=1` **ou** réglage persisté.
 
 ## Lancer
 

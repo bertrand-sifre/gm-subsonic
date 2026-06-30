@@ -10,6 +10,8 @@
   import CenterView from './lib/CenterView.svelte';
   import NowPlaying from './lib/NowPlaying.svelte';
   import PlayerBar from './lib/PlayerBar.svelte';
+  import Settings from './lib/Settings.svelte';
+  import ImportDialog from './lib/ImportDialog.svelte';
 
   onMount(() => {
     void initLibrary();
@@ -39,6 +41,9 @@
 
   <PlayerBar />
 </div>
+
+<Settings />
+<ImportDialog />
 
 <style>
   .app {
