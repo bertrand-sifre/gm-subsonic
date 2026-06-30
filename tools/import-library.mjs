@@ -65,7 +65,13 @@ const STEMS_CACHE_FILE = join(MEDIA_DIR, 'stems.cache.json');
 // APU — qui restait à la fin de fenêtre sur les drivers ré-écrivant le silence chaque
 // frame (ex. Tetris Game Boy piste 1 : `naturalLengthSeconds` null -> fausse durée
 // 120 s « 2:00 », au lieu de ~38.6 s). Le bump force le recalcul des entrées GBS.
-const LOOP_CACHE_SCHEMA = 7;
+// Schéma 8 : 3e étage de détection GBS — boucle TOLÉRANTE (analyzeStatesTolerant) pour
+// les drivers à MODULATION CONTINUE dont le vibrato/enveloppe/panning à phase libre
+// casse l'égalité bit-exacte de l'étage EXACT, alors que la piste boucle franchement
+// (ex. Gargoyle's Quest pistes 1/2/4/5… : `loop` null + `naturalLength` null -> fausse
+// durée 120 s « 2:00 », au lieu de boucles de ~33–72 s). Ordre : exact -> fini ->
+// tolérant -> fallback. Le bump force le recalcul des entrées GBS.
+const LOOP_CACHE_SCHEMA = 8;
 
 const FALLBACK_SECONDS = Number(process.env.VDM_FALLBACK_SECONDS ?? 120);
 const CONCURRENCY = 6;

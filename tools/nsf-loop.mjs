@@ -260,6 +260,114 @@ export function analyzeFiniteEnd(fullStates, fps, opts = {}) {
 }
 
 /**
+ * Détection de boucle TOLÉRANTE pour les drivers à MODULATION CONTINUE (GBS).
+ *
+ * Pourquoi : analyzeStates exige une répétition BIT-EXACTE et CONTIGUË du log
+ * (`tailrun(p) >= p`). Cette parité stricte tient pour le NES et pour les drivers
+ * GBS qui rebouclent à l'identique, mais ÉCHOUE quand le driver applique un vibrato
+ * (pitch), une enveloppe ou un panning dont la PHASE de LFO N'EST PAS réinitialisée
+ * au point de boucle : le SQUELETTE musical (déclenchements, durées, duty, on/off,
+ * wave RAM, bruit) se répète bit-pour-bit à période ENTIÈRE exacte, mais les
+ * registres de fréquence/enveloppe/panning portent une phase libre — une SEULE frame
+ * modulée différente casse le run contigu -> aucune période -> repli 120 s (« 2:00 »).
+ * Mesuré sur Gargoyle's Quest (Capcom) : en masquant fréquence+enveloppe+panning,
+ * l'égalité d'état remonte à EXACTEMENT 100 % à la période vraie (cf. analyse gdm).
+ *
+ * Principe : autocorrélation FRACTIONNAIRE sur l'ÉTAT COMPLET des 48 registres (le
+ * `full` de gdm-loop), pas sur le delta. Pour chaque période p, on mesure la FRACTION
+ * de frames de la queue où full[i] == full[i+p] ; on retient le PLUS PETIT pic dont la
+ * fraction dépasse `matchThreshold`. La mélodie (registres de fréquence) reste NON
+ * masquée : c'est elle qui fait chuter la fraction d'une SOUS-PÉRIODE (demi-boucle :
+ * notes différentes), si bien que le fondamental n'est jamais confondu avec sa moitié.
+ *
+ * ⚠ À n'employer qu'en DERNIER RECOURS (après analyzeStates EXACT et après
+ * analyzeFiniteEnd) : une piste FINIE se fige en SILENCE constant, lequel coïncide
+ * avec lui-même à TOUTE période (fausse micro-boucle à 100 %). La garde anti-silence
+ * ci-dessous (queue appariée >= minDistinctFrames états distincts) est une défense en
+ * profondeur, mais l'ORDRE du pipeline (fini AVANT tolérant) reste la garde primaire.
+ *
+ * loopStart : laissé à 0 (la période EST la durée). Détecter une vraie intro sous
+ * modulation est non fiable ; pour une piste sans intro (cas dominant) c'est exact, et
+ * la DURÉE de boucle — l'enjeu du « 2:00 » — est juste dans tous les cas.
+ *
+ * @param {Int32Array|number[]} fullStates  un id d'ÉTAT complet des registres par frame
+ * @param {number} fps                      frame-rate autoritaire (Hz)
+ * @param {object} [opts]                   sampleRate/pminSec/pmaxSec/tailGuardSec/matchWinSec/matchThreshold/minDistinctFrames
+ * @returns {{ startSeconds, lengthSeconds, startSamples, lengthSamples, sampleRate, frameRate } | null}
+ */
+export function analyzeStatesTolerant(fullStates, fps, opts = {}) {
+  const {
+    sampleRate = 44100,
+    pminSec = 1,
+    pmaxSec = 100,
+    tailGuardSec = 2,
+    matchWinSec = 60, // fenêtre de queue sur laquelle on mesure la fraction de match
+    matchThreshold = 0.6, // seuil validé : vraies boucles >= 65 %, sous-périodes <= 52 %
+    minDistinctFrames = 8,
+  } = opts;
+
+  const H = fullStates;
+  const N = H.length;
+  const pmin = Math.round(pminSec * fps);
+  const tailGuardFrames = Math.round(tailGuardSec * fps);
+  const pmax = Math.min(N - tailGuardFrames, Math.round(pmaxSec * fps));
+  if (N < pmin + tailGuardFrames || pmax <= pmin) return null;
+
+  // matchFrac(p) : fraction des dernières matchWinSec où full[i] == full[i+p].
+  const winFrames = Math.round(matchWinSec * fps);
+  const fracs = new Float64Array(pmax);
+  let bestFrac = -1;
+  for (let p = pmin; p < pmax; p++) {
+    const W = Math.min(N - p, winFrames);
+    const start = N - p - 1;
+    let matches = 0;
+    for (let k = 0; k < W; k++) if (H[start - k] === H[start - k + p]) matches++;
+    const f = matches / W;
+    fracs[p] = f;
+    if (f > bestFrac) bestFrac = f;
+  }
+  if (bestFrac < matchThreshold) return null; // pas de période franche -> repli paramétrique
+
+  // Pics = maxima locaux >= seuil (séparés de > 0.5 s, pour ne pas éclater un pic en
+  // plusieurs candidats voisins) ; le FONDAMENTAL est le pic de plus PETITE période.
+  const minSep = Math.round(0.5 * fps);
+  const peaks = [];
+  for (let p = pmin; p < pmax; p++) {
+    if (fracs[p] < matchThreshold) continue;
+    let isMax = true;
+    for (let q = Math.max(pmin, p - minSep); q < Math.min(pmax, p + minSep + 1); q++) {
+      if (fracs[q] > fracs[p]) { isMax = false; break; }
+    }
+    if (isMax) peaks.push(p);
+  }
+  if (peaks.length === 0) return null;
+  peaks.sort((a, b) => a - b);
+  let pStar = peaks[0];
+  for (let q = Math.max(pmin, pStar - minSep); q < Math.min(pmax, pStar + minSep + 1); q++) {
+    if (fracs[q] > fracs[pStar]) pStar = q; // affine sur l'argmax exact du cluster
+  }
+
+  // Garde anti-silence : la QUEUE APPARIÉE [N-pStar, N) doit porter >= minDistinctFrames
+  // états distincts (sinon = silence figé d'une piste finie -> rejet).
+  const seen = new Set();
+  for (let j = N - pStar; j < N; j++) {
+    seen.add(H[j]);
+    if (seen.size >= minDistinctFrames) break;
+  }
+  if (seen.size < minDistinctFrames) return null;
+
+  const loopStartFrames = 0; // pas de détection d'intro sous modulation : période = durée
+  return {
+    startSeconds: +(loopStartFrames / fps).toFixed(4),
+    lengthSeconds: +(pStar / fps).toFixed(4),
+    startSamples: Math.round((loopStartFrames * sampleRate) / fps),
+    lengthSamples: Math.round((pStar * sampleRate) / fps),
+    sampleRate,
+    frameRate: +fps.toFixed(4),
+  };
+}
+
+/**
  * Détecte la boucle à partir du TEXTE d'un log de registres NES déjà rendu.
  * Exporté pour test/CLI hors nsftool. Wrapper mince autour d'analyzeStates au fps
  * NTSC NES (défauts d'opts = constantes historiques) -> comportement bit pour bit

@@ -51,7 +51,7 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-import { analyzeStates, analyzeFiniteEnd } from './nsf-loop.mjs';
+import { analyzeStates, analyzeFiniteEnd, analyzeStatesTolerant } from './nsf-loop.mjs';
 
 const LEN_MS = 200000; // 200 s : couvre toute boucle <= ~100 s avec marge >= 1 période
 const RATE = 8000; // rendu rapide ; le compte de frames est rate-indépendant
@@ -160,22 +160,34 @@ export async function detectLoop({ sourcePath, trackIndex, gdm = 'gdm' }) {
   if (!parsed) return { loop: null, naturalLengthSeconds: null }; // en-tête absente / invalide
   const { delta, full, fps } = parsed;
 
-  // Période + loopStart sur le delta (parité nsf-loop), en IGNORANT l'artefact d'init
-  // de la frame 0 (sinon fausse intro d'1 frame sur les pistes qui bouclent dès 0) et
-  // en RAFFINANT loopStart via l'état complet (full) pour un raccord seamless propre
-  // (sinon la note tenue à la frontière vient de l'intro).
-  const loop = analyzeStates(delta, fps, { ignoreFirstFrameMismatch: true, refineStates: full });
-
-  // Durée naturelle d'une piste FINIE : le DERNIER changement d'état des registres
-  // (analyzeFiniteEnd sur `full`), pas la dernière écriture — les drivers GBS qui
-  // ré-écrivent le silence à chaque frame fausseraient la durée à la fin de fenêtre.
-  // Inutile quand une boucle est trouvée (durée = loopEnd) : on ne la calcule qu'à
-  // défaut de boucle. C'est l'importeur qui arbitre selon `loop`.
-  const naturalLengthSeconds = loop ? null : analyzeFiniteEnd(full, fps);
+  // Pipeline à 3 étages, du plus sûr au plus permissif :
+  //
+  //  1) EXACT (analyzeStates sur le delta) — répétition bit-exacte contiguë, parité
+  //     nsf-loop. On IGNORE l'artefact d'init de la frame 0 (sinon fausse intro d'1
+  //     frame) et on RAFFINE loopStart via l'état complet (full) pour un raccord propre.
+  //  2) FINI (analyzeFiniteEnd sur full) — piste non-bouclante : durée = DERNIER
+  //     changement d'état (pas la dernière écriture : les drivers ré-écrivent le silence
+  //     chaque frame). PRIORITAIRE sur le tolérant, sinon le silence figé d'une piste
+  //     finie matcherait à toute période (fausse micro-boucle).
+  //  3) TOLÉRANT (analyzeStatesTolerant sur full) — boucle MODULÉE : vibrato/enveloppe/
+  //     panning à phase libre cassent l'égalité bit-exacte de l'étage 1 alors que la
+  //     piste boucle franchement (cas Gargoyle's Quest). Autocorrélation fractionnaire.
+  //
+  // L'importeur arbitre ensuite selon `loop` (présent -> boucle, sinon naturalLength).
+  let loop = analyzeStates(delta, fps, { ignoreFirstFrameMismatch: true, refineStates: full });
+  let method = loop ? 'exact' : null;
+  let naturalLengthSeconds = null;
+  if (!loop) {
+    naturalLengthSeconds = analyzeFiniteEnd(full, fps); // étage 2 : piste finie
+    if (naturalLengthSeconds == null) {
+      loop = analyzeStatesTolerant(full, fps); // étage 3 : boucle modulée
+      if (loop) method = 'tolerant';
+    }
+  }
 
   if (process.env.VDM_GBS_LOOP_DEBUG) {
     process.stderr.write(
-      `[gdm-loop] method=register-log fps=${fps.toFixed(4)} frames=${delta.length} ` +
+      `[gdm-loop] method=${method ?? 'aucune'} fps=${fps.toFixed(4)} frames=${delta.length} ` +
       `loop=${loop
         ? `start=${loop.startSeconds}s length=${loop.lengthSeconds}s ` +
           `samples[start=${loop.startSamples} len=${loop.lengthSamples}]`
