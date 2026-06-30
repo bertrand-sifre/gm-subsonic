@@ -1,14 +1,14 @@
 <script lang="ts">
   /**
-   * Colonne centrale : aiguille selon la vue active (et la recherche). Les vues
-   * pilotées par des données réelles (bibliothèque, consoles, compositeurs,
-   * favoris, historique, recherche) sont fonctionnelles ; Découvrir / Genres
-   * sont des placeholders « bientôt » faute de données.
+   * Colonne centrale : aiguille selon la vue active (et la recherche). Toutes les
+   * vues (bibliothèque, compositeurs, favoris, historique, recherche) sont pilotées
+   * par des données réelles.
    */
   import type { Track } from '@vdm/shared';
   import {
     view, search, selectedGame, selectedConsole, library, favorites, historyIds,
-    openGame, openConsole, navigate, gamesOfPlatform, composerCounts, searchTracks, trackById,
+    openGame, openConsole, navigate, platformList, gamesOfPlatform,
+    composerCounts, searchTracks, trackById,
   } from './player';
   import { coverGradient, initials } from './cover';
   import Icon from './Icon.svelte';
@@ -21,19 +21,8 @@
   $: favTracks = games.flatMap((g) => g.tracks).filter((t) => $favorites.has(t.id));
   $: histTracks = $historyIds.map((id) => trackById(id)).filter((t): t is Track => !!t);
   $: composers = $library ? composerCounts() : [];
-
-  // Cartes « consoles » : agrégat plateforme -> nb jeux + nb pistes.
-  $: consoleCards = aggregateConsoles(games);
-  function aggregateConsoles(gs: typeof games): { p: string; games: number; tracks: number }[] {
-    const acc: { p: string; games: number; tracks: number }[] = [];
-    for (const g of gs) {
-      const p = g.tracks[0]?.platform ?? 'Autre';
-      const e = acc.find((x) => x.p === p);
-      if (e) { e.games++; e.tracks += g.tracks.length; }
-      else acc.push({ p, games: 1, tracks: g.tracks.length });
-    }
-    return acc;
-  }
+  $: consoles = $library ? platformList() : [];
+  $: consoleGames = $selectedConsole ? gamesOfPlatform($selectedConsole) : [];
 
   function gameMeta(g: { tracks: Track[] }): { platform: string | null; count: number } {
     return { platform: g.tracks[0]?.platform ?? null, count: g.tracks.length };
@@ -51,15 +40,35 @@
   {:else if $view === 'library'}
     {#if $selectedGame}
       <GameDetail game={$selectedGame} />
-    {:else}
+    {:else if $selectedConsole}
+      <!-- Jeux d'une console -->
       <section class="view-pad">
-        <h2 class="vh">Bibliothèque</h2>
+        <nav class="crumbs">
+          <button on:click={() => navigate('library')}>Bibliothèque</button>
+          <Icon name="chevron-right" size={13} />
+          <span class="cur">{$selectedConsole}</span>
+        </nav>
+        <h2 class="vh">{$selectedConsole}</h2>
         <div class="grid">
-          {#each games as g}
+          {#each consoleGames as g}
             <button class="card" on:click={() => openGame(g.game)}>
               <div class="cc" style="background:{coverGradient(g.game)}"><span>{initials(g.game)}</span></div>
               <div class="cn">{g.game}</div>
-              <div class="cm">{gameMeta(g).platform ?? ''} · {gameMeta(g).count} pistes</div>
+              <div class="cm">{g.tracks.length} pistes</div>
+            </button>
+          {/each}
+        </div>
+      </section>
+    {:else}
+      <!-- Liste des consoles (vue par défaut de la Bibliothèque) -->
+      <section class="view-pad">
+        <h2 class="vh">Bibliothèque</h2>
+        <div class="grid">
+          {#each consoles as c}
+            <button class="card console-card" on:click={() => openConsole(c.platform)}>
+              <div class="cc" style="background:{coverGradient(c.platform)}"><Icon name="gamepad" size={34} /></div>
+              <div class="cn">{c.platform}</div>
+              <div class="cm">{c.games} jeux · {c.tracks} pistes</div>
             </button>
           {/each}
         </div>
@@ -68,8 +77,7 @@
 
   {:else if $view === 'home'}
     <section class="view-pad">
-      <h2 class="vh">Bonjour 👋</h2>
-      <h3 class="sh">Votre bibliothèque</h3>
+      <h2 class="vh">Votre bibliothèque</h2>
       <div class="grid">
         {#each games as g}
           <button class="card" on:click={() => openGame(g.game)}>
@@ -82,34 +90,6 @@
       {#if histTracks.length}
         <h3 class="sh">Écoutés récemment</h3>
         <TrackList tracks={histTracks.slice(0, 8)} showGame />
-      {/if}
-    </section>
-
-  {:else if $view === 'consoles'}
-    <section class="view-pad">
-      {#if $selectedConsole}
-        <button class="back" on:click={() => navigate('consoles')}><span class="flip"><Icon name="chevron-right" size={14} /></span> Toutes les consoles</button>
-        <h2 class="vh">{$selectedConsole}</h2>
-        <div class="grid">
-          {#each gamesOfPlatform($selectedConsole) as g}
-            <button class="card" on:click={() => openGame(g.game)}>
-              <div class="cc" style="background:{coverGradient(g.game)}"><span>{initials(g.game)}</span></div>
-              <div class="cn">{g.game}</div>
-              <div class="cm">{g.tracks.length} pistes</div>
-            </button>
-          {/each}
-        </div>
-      {:else}
-        <h2 class="vh">Consoles</h2>
-        <div class="grid">
-          {#each consoleCards as c}
-            <button class="card console-card" on:click={() => openConsole(c.p)}>
-              <div class="cc" style="background:{coverGradient(c.p)}"><Icon name="gamepad" size={34} /></div>
-              <div class="cn">{c.p}</div>
-              <div class="cm">{c.games} jeux · {c.tracks} pistes</div>
-            </button>
-          {/each}
-        </div>
       {/if}
     </section>
 
@@ -141,16 +121,6 @@
     <section class="view-pad">
       <h2 class="vh">Historique</h2>
       <TrackList tracks={histTracks} showGame emptyLabel="Aucune écoute récente." />
-    </section>
-
-  {:else}
-    <!-- Découvrir / Genres : placeholders -->
-    <section class="view-pad placeholder-view">
-      <div class="ph-card">
-        <Icon name={$view === 'genres' ? 'sliders' : 'compass'} size={40} />
-        <h2>{$view === 'genres' ? 'Genres / Ambiances' : 'Découvrir'}</h2>
-        <p class="ph">Bientôt disponible. Cette section s'enrichira avec de nouvelles métadonnées.</p>
-      </div>
     </section>
   {/if}
 </main>
@@ -197,27 +167,17 @@
   .cm { font-size: 12px; color: var(--text-faint); }
   .console-card .cc { color: #fff; }
 
-  .back {
-    align-self: flex-start;
-    display: inline-flex;
+  .crumbs {
+    display: flex;
     align-items: center;
-    gap: 4px;
-    color: var(--text-dim);
+    gap: 7px;
     font-size: 13px;
+    color: var(--text-faint);
+    margin-bottom: 2px;
   }
-  .back .flip { display: inline-flex; transform: scaleX(-1); }
-  .back:hover { color: var(--text); }
+  .crumbs button { color: var(--text-dim); }
+  .crumbs button:hover { color: var(--text); }
+  .crumbs .cur { color: var(--text); font-weight: 500; }
 
   .ph { color: var(--text-faint); font-style: italic; }
-  .placeholder-view { align-items: center; justify-content: center; min-height: 60%; }
-  .ph-card {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 10px;
-    color: var(--text-faint);
-    text-align: center;
-    margin-top: 60px;
-  }
-  .ph-card h2 { margin: 4px 0 0; color: var(--text-dim); }
 </style>

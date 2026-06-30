@@ -17,9 +17,10 @@ UI inspirée des lecteurs de streaming (Spotify/SoundCloud) : coquille 3 colonne
 - `src/lib/LoopPlayer.ts` — **cœur audio**. Lecteur Web Audio : intro/boucle/queue,
   fondu, **mixage de stems** (gain par voix), **volume master** (indépendant du fondu),
   **seek** (re-planif à offset arbitraire) et `getPeaks()` (forme d'onde réelle).
-- Composants : `Sidebar`, `CenterView` (routeur de vues), `GameDetail`, `TrackList`,
-  `NowPlaying` (transport, modes, structure, mixer, infos), `ChannelMixer`,
-  `StructureBar`, `Waveform`, `PlayerBar`, `Icon` (SVG inline).
+- Composants : `Sidebar` (nav : Accueil/Bibliothèque/Compositeurs/Favoris/Historique),
+  `CenterView` (routeur de vues), `GameDetail`, `TrackList`, `NowPlaying` (transport,
+  modes, structure, mixer, infos), `ChannelMixer`, `StructureBar`, `Waveform`,
+  `PlayerBar`, `Icon` (SVG inline).
 - `src/lib/cover.ts` — placeholders déterministes (dégradé + initiales) pour les
   métadonnées absentes du backend (pas de jaquette). `src/lib/format.ts` — fmt temps.
 - `src/theme.css` — **tokens de design globaux** (couleurs/rayons/dimensions) ; tout

@@ -13,7 +13,7 @@
 
   export let game: string;
 
-  type Tab = 'tracks' | 'infos' | 'files' | 'artwork';
+  type Tab = 'tracks' | 'infos' | 'files' | 'screenshot';
   let tab: Tab = 'tracks';
 
   $: tracks = tracksOfGame(game);
@@ -98,7 +98,6 @@
           <Icon name={allFav ? 'heart-filled' : 'heart'} size={16} />
           {allFav ? 'Dans les favoris' : 'Favori'}
         </button>
-        <button class="ghost-btn icon-only" title="Plus" aria-label="Plus d'options"><Icon name="more" size={16} /></button>
       </div>
     </div>
   </header>
@@ -108,7 +107,7 @@
     <button class:active={tab === 'tracks'} on:click={() => (tab = 'tracks')}>Pistes ({tracks.length})</button>
     <button class:active={tab === 'infos'} on:click={() => (tab = 'infos')}>Infos</button>
     <button class:active={tab === 'files'} on:click={() => (tab = 'files')}>Fichiers</button>
-    <button class:active={tab === 'artwork'} on:click={() => (tab = 'artwork')}>Artwork</button>
+    <button class:active={tab === 'screenshot'} on:click={() => (tab = 'screenshot')}>Screenshot</button>
   </nav>
 
   <div class="tab-body">
@@ -139,7 +138,7 @@
     {:else}
       <div class="artwork">
         <div class="art-cover" style="background:{coverGradient(game)}"><span>{initials(game)}</span></div>
-        <p class="faint">Pas d'artwork importé pour ce jeu.</p>
+        <p class="faint">Pas de screenshot importé pour ce jeu.</p>
       </div>
     {/if}
   </div>
@@ -234,7 +233,6 @@
   }
   .ghost-btn:hover { border-color: var(--border-strong); }
   .ghost-btn.on { color: var(--pink); border-color: rgba(255,107,157,0.4); }
-  .ghost-btn.icon-only { padding: 9px 11px; }
 
   .tabs {
     display: flex;

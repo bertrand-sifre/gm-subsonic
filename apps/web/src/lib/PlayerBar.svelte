@@ -1,11 +1,11 @@
 <script lang="ts">
   /**
    * Barre de lecture du bas (pleine largeur) : pochette + infos, transport,
-   * forme d'onde-scrubber + temps, volume master et bouton de file.
+   * forme d'onde-scrubber + temps et volume master.
    */
   import {
     current, status, progress, shuffle, repeat, favorites,
-    masterVolume, masterMuted, queueOpen,
+    masterVolume, masterMuted,
     togglePlay, next, prev, toggleShuffle, cycleRepeat, toggleFavorite,
     setMasterVolume, toggleMasterMute,
   } from './player';
@@ -65,7 +65,7 @@
     </div>
   </div>
 
-  <!-- Volume + file -->
+  <!-- Volume -->
   <div class="right">
     <button
       class="ic"
@@ -82,9 +82,6 @@
       on:input={(e) => setMasterVolume(+e.currentTarget.value / 100)}
       aria-label="Volume"
     />
-    <button class="ic" class:on={$queueOpen} aria-pressed={$queueOpen} on:click={() => queueOpen.update((q) => !q)} title="File de lecture" aria-label="File de lecture">
-      <Icon name="queue" size={19} />
-    </button>
   </div>
 </footer>
 

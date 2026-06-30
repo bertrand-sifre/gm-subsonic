@@ -18,7 +18,7 @@
   import StructureBar from './StructureBar.svelte';
   import ChannelMixer from './ChannelMixer.svelte';
 
-  type Tab = 'analyse' | 'meta' | 'notes';
+  type Tab = 'analyse' | 'meta';
   let tab: Tab = 'analyse';
 
   $: t = $current;
@@ -189,7 +189,6 @@
     <nav class="tabs">
       <button class:active={tab === 'analyse'} on:click={() => (tab = 'analyse')}>Analyse</button>
       <button class:active={tab === 'meta'} on:click={() => (tab = 'meta')}>Métadonnées</button>
-      <button class:active={tab === 'notes'} on:click={() => (tab = 'notes')}>Notes</button>
     </nav>
 
     <div class="tab-body">
@@ -240,8 +239,6 @@
             <dt>Compositeur</dt><dd>{t.composer ?? '—'}</dd>
           </dl>
         </section>
-      {:else}
-        <p class="muted notes">Aucune note pour cette piste.</p>
       {/if}
     </div>
   {/if}
@@ -513,5 +510,4 @@
   .tech dd.mono { font-family: var(--mono); font-size: 11.5px; }
 
   .muted { color: var(--text-faint); font-style: italic; font-size: 13px; }
-  .notes { padding: 12px 0; }
 </style>

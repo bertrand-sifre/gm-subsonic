@@ -1,36 +1,26 @@
 <script lang="ts">
   /**
-   * Barre latérale gauche : logo, recherche, navigation principale, liste des
-   * consoles (comptées depuis la bibliothèque réelle) et profil. Les sections
-   * sans données réelles restent présentes (façade) mais inertes/placeholder.
+   * Barre latérale gauche : logo, recherche, navigation principale.
    */
   import type { IconName } from './Icon.svelte';
-  import {
-    library, view, search, favorites, historyIds, selectedConsole,
-    navigate, openConsole, consoleCounts, type ViewName,
-  } from './player';
+  import { view, search, favorites, historyIds, navigate, type ViewName } from './player';
   import Icon from './Icon.svelte';
 
   const NAV: { id: ViewName; label: string; icon: IconName }[] = [
     { id: 'home', label: 'Accueil', icon: 'home' },
     { id: 'library', label: 'Bibliothèque', icon: 'library' },
-    { id: 'discover', label: 'Découvrir', icon: 'compass' },
-    { id: 'genres', label: 'Genres / Ambiances', icon: 'sliders' },
-    { id: 'consoles', label: 'Consoles', icon: 'gamepad' },
     { id: 'composers', label: 'Compositeurs', icon: 'users' },
     { id: 'favorites', label: 'Favoris', icon: 'heart' },
     { id: 'history', label: 'Historique', icon: 'clock' },
   ];
-
-  $: consoles = $library ? consoleCounts() : [];
 </script>
 
 <aside class="sidebar">
   <div class="brand">
     <div class="logo"><Icon name="gamepad" size={22} /></div>
     <div class="brand-text">
-      <span class="b1">GAME MUSIC</span>
-      <span class="b2">ARCHIVE</span>
+      <span class="b1">VIDEO GAME MUSIC</span>
+      <span class="b2">PLAYER</span>
     </div>
   </div>
 
@@ -51,36 +41,7 @@
     {/each}
   </nav>
 
-  <div class="section-title">Consoles</div>
-  <div class="consoles">
-    {#each consoles as c}
-      <button
-        class="console"
-        class:active={$view === 'consoles' && $selectedConsole === c.platform}
-        on:click={() => openConsole(c.platform)}
-      >
-        <span class="c-name">{c.platform}</span>
-        <span class="c-count">{c.count}</span>
-      </button>
-    {/each}
-    {#if !consoles.length}
-      <span class="placeholder">—</span>
-    {/if}
-  </div>
-
   <div class="spacer"></div>
-
-  <div class="profile">
-    <div class="avatar">P1</div>
-    <div class="who">
-      <span class="name">player1</span>
-      <span class="role">Collectionneur</span>
-    </div>
-    <div class="actions">
-      <button title="Importer"><Icon name="download" size={16} /></button>
-      <button title="Réglages"><Icon name="settings" size={16} /></button>
-    </div>
-  </div>
 </aside>
 
 <style>
@@ -176,61 +137,5 @@
     font-variant-numeric: tabular-nums;
   }
 
-  .section-title {
-    font-size: 11px;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    color: var(--text-faint);
-    font-weight: 700;
-    padding: 4px 12px 0;
-  }
-  .consoles { display: flex; flex-direction: column; gap: 1px; }
-  .console {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 7px 12px;
-    border-radius: var(--r-sm);
-    color: var(--text-dim);
-    font-size: 13px;
-    text-align: left;
-  }
-  .console:hover { background: var(--surface-hover); color: var(--text); }
-  .console.active { color: var(--accent-strong); }
-  .c-count { font-size: 11px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
-  .placeholder { padding: 7px 12px; color: var(--text-faint); }
-
   .spacer { flex: 1; min-height: 8px; }
-
-  .profile {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 8px;
-    border-radius: var(--r-md);
-    background: var(--surface);
-    border: 1px solid var(--border-soft);
-  }
-  .avatar {
-    width: 36px; height: 36px;
-    border-radius: 50%;
-    background: linear-gradient(135deg, #4dd0e1, #7c5cff);
-    color: #fff;
-    font-weight: 800;
-    font-size: 12px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex: none;
-  }
-  .who { display: flex; flex-direction: column; flex: 1; min-width: 0; }
-  .name { font-size: 13px; font-weight: 600; }
-  .role { font-size: 11px; color: var(--text-faint); }
-  .actions { display: flex; gap: 2px; }
-  .actions button {
-    color: var(--text-faint);
-    padding: 6px;
-    border-radius: var(--r-sm);
-  }
-  .actions button:hover { color: var(--text); background: var(--surface-2); }
 </style>

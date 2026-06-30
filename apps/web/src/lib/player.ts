@@ -14,8 +14,7 @@ import { LoopPlayer, type Progress } from './LoopPlayer';
 
 export type Status = 'stopped' | 'loading' | 'playing' | 'paused';
 export type RepeatMode = 'off' | 'all' | 'one';
-export type ViewName =
-  | 'home' | 'library' | 'discover' | 'genres' | 'consoles' | 'composers' | 'favorites' | 'history';
+export type ViewName = 'home' | 'library' | 'composers' | 'favorites' | 'history';
 
 /** État de mixage d'un canal (stem). */
 export interface ChannelState {
@@ -31,6 +30,7 @@ export const library = writable<Library | null>(null);
 export const loadError = writable<string>('');
 export const view = writable<ViewName>('library');
 export const selectedGame = writable<string | null>(null);
+/** Console (plateforme) sélectionnée dans la vue Bibliothèque (console → jeux → détail). */
 export const selectedConsole = writable<string | null>(null);
 export const search = writable<string>('');
 
@@ -63,8 +63,6 @@ export const queue = writable<Track[]>([]);
 export const queueIndex = writable<number>(0);
 export const shuffle = writable<boolean>(false);
 export const repeat = writable<RepeatMode>('off');
-/** File ouverte (panneau latéral / barre du bas) ? */
-export const queueOpen = writable<boolean>(false);
 
 // --- Stores : favoris & historique (persistés en localStorage) --------------
 
@@ -151,14 +149,27 @@ export async function initLibrary(): Promise<void> {
     const lib = await fetchLibrary();
     library.set(lib);
     // Sélection initiale : premier jeu.
-    if (lib.games.length && get(selectedGame) == null) selectedGame.set(lib.games[0].game);
+    // Vue Bibliothèque par défaut = liste des consoles (pas de jeu présélectionné).
   } catch (e) {
     loadError.set(String(e));
   }
 }
 
 export function navigate(v: ViewName): void {
+  // Aller à la Bibliothèque = revenir à la racine (liste des consoles) : on
+  // réinitialise la sélection console/jeu (sinon on resterait sur le détail).
+  if (v === 'library') {
+    selectedGame.set(null);
+    selectedConsole.set(null);
+  }
   view.set(v);
+}
+
+/** Ouvre une console (plateforme) → liste de ses jeux. */
+export function openConsole(platform: string): void {
+  selectedConsole.set(platform);
+  selectedGame.set(null);
+  view.set('library');
 }
 
 export function openGame(game: string): void {
@@ -166,29 +177,28 @@ export function openGame(game: string): void {
   view.set('library');
 }
 
-export function openConsole(platform: string): void {
-  selectedConsole.set(platform);
-  view.set('consoles');
-}
-
-/** Compteur de pistes par plateforme (pour la liste « consoles » de la sidebar). */
-export function consoleCounts(): { platform: string; count: number }[] {
+/** Liste des consoles (plateformes) avec nb de jeux + nb de pistes. */
+export function platformList(): { platform: string; games: number; tracks: number }[] {
   const lib = get(library);
   if (!lib) return [];
-  const by = new Map<string, number>();
-  for (const g of lib.games)
-    for (const t of g.tracks) {
-      const p = t.platform ?? 'Autre';
-      by.set(p, (by.get(p) ?? 0) + 1);
-    }
-  return [...by.entries()].map(([platform, count]) => ({ platform, count })).sort((a, b) => b.count - a.count);
+  const by = new Map<string, { games: number; tracks: number }>();
+  for (const g of lib.games) {
+    const p = g.tracks[0]?.platform ?? 'Autre';
+    const e = by.get(p) ?? { games: 0, tracks: 0 };
+    e.games += 1;
+    e.tracks += g.tracks.length;
+    by.set(p, e);
+  }
+  return [...by.entries()]
+    .map(([platform, v]) => ({ platform, ...v }))
+    .sort((a, b) => b.tracks - a.tracks);
 }
 
-/** Liste des jeux d'une plateforme (vue consoles). */
+/** Jeux d'une plateforme donnée. */
 export function gamesOfPlatform(platform: string): { game: string; tracks: Track[] }[] {
   const lib = get(library);
   if (!lib) return [];
-  return lib.games.filter((g) => g.tracks.some((t) => (t.platform ?? 'Autre') === platform));
+  return lib.games.filter((g) => (g.tracks[0]?.platform ?? 'Autre') === platform);
 }
 
 /** Compositeurs distincts avec leur nombre de pistes. */
