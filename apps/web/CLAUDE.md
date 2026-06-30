@@ -5,12 +5,32 @@ de musiques de jeu. Sert sur le port `5173`, avec un proxy `/api → http://loca
 
 ## Fichiers
 
-- `src/App.svelte` — UI : liste par jeu, sélection d'un morceau, contrôles (comportement,
-  nombre de boucles, durée de fondu), transport play/stop, état de lecture.
-- `src/lib/LoopPlayer.ts` — **cœur du projet**. Lecteur Web Audio reproduisant les
-  particularités d'une musique de jeu.
+UI inspirée des lecteurs de streaming (Spotify/SoundCloud) : coquille 3 colonnes
+(sidebar / centre / lecture en cours) + barre de lecture en pied de page.
+
+- `src/App.svelte` — **coquille** : grille 3 colonnes + barre du bas, init de la
+  bibliothèque, responsive. Toute la logique est déléguée au store.
+- `src/lib/player.ts` — **store central** (stores Svelte) : pilote le `LoopPlayer`,
+  file de lecture (next/prev/shuffle/repeat), favoris + historique (localStorage),
+  navigation, état des canaux (volume/mute/solo), volume master, recherche. Boucle
+  rAF UNIQUE mettant à jour `progress` + `frame` (déclencheur de redraw des canvas).
+- `src/lib/LoopPlayer.ts` — **cœur audio**. Lecteur Web Audio : intro/boucle/queue,
+  fondu, **mixage de stems** (gain par voix), **volume master** (indépendant du fondu),
+  **seek** (re-planif à offset arbitraire) et `getPeaks()` (forme d'onde réelle).
+- Composants : `Sidebar`, `CenterView` (routeur de vues), `GameDetail`, `TrackList`,
+  `NowPlaying` (transport, modes, structure, mixer, infos), `ChannelMixer`,
+  `StructureBar`, `Waveform`, `PlayerBar`, `Icon` (SVG inline).
+- `src/lib/cover.ts` — placeholders déterministes (dégradé + initiales) pour les
+  métadonnées absentes du backend (pas de jaquette). `src/lib/format.ts` — fmt temps.
+- `src/theme.css` — **tokens de design globaux** (couleurs/rayons/dimensions) ; tout
+  composant s'y réfère via `var(--…)`, pas de couleurs en dur.
 - `src/lib/api.ts` — `fetchLibrary()` (appel `/api/library`).
-- `src/main.ts` — montage de l'app.
+- `src/main.ts` — montage de l'app (importe `theme.css`).
+
+> ⚠️ **Pièges réactivité Svelte 4** : un `$: x = f()` où `f` lit des stores/vars NON
+> passés en argument n'est JAMAIS recalculé (dépendance invisible). Toujours passer les
+> dépendances en argument (`f($store, …)`). Mode de lecture par défaut : `loopCount` à
+> 2 boucles → lecture FINIE → `onEnded` enchaîne la file ; `loopInfinite` épingle une piste.
 
 ## LoopPlayer — modèle de lecture
 

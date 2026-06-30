@@ -1,0 +1,129 @@
+/* Tokens de design globaux — contrat visuel partagé par tous les composants.
+   Inspiré de la maquette (thème sombre violet, façon lecteur de streaming). */
+
+:root {
+  /* Surfaces */
+  --bg-app: #0c0b13;
+  --bg-sidebar: #100e1a;
+  --bg-main: #0f0d18;
+  --bg-panel: #141220;
+  --surface: #1b1829;
+  --surface-2: #232038;
+  --surface-3: #2c2945;
+  --surface-hover: #211d31;
+
+  /* Bordures */
+  --border: #272338;
+  --border-soft: #1d1a2a;
+  --border-strong: #34304c;
+
+  /* Texte */
+  --text: #ece9f6;
+  --text-dim: #a8a3c4;
+  /* --text-faint éclairci pour passer le contraste AA (~4.5:1) sur fonds sombres
+     tout en restant une teinte secondaire discrète. */
+  --text-faint: #908bad;
+
+  /* Accent (violet) */
+  --accent: #7c5cff;
+  --accent-strong: #8b5cff;
+  --accent-soft: rgba(124, 92, 255, 0.16);
+  --accent-line: rgba(124, 92, 255, 0.45);
+  --accent-grad: linear-gradient(135deg, #8b5cff, #6c4cf0);
+
+  /* Sémantique (boucle / fondu / canaux) */
+  --good: #2ec5a0;
+  --warn: #ff9f43;
+  --pink: #ff6b9d;
+  --cyan: #4dd0e1;
+  --danger: #ff6b81;
+
+  /* Rayons */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 18px;
+  --r-pill: 999px;
+
+  /* Ombres */
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 14px 44px rgba(0, 0, 0, 0.5);
+
+  /* Dimensions */
+  --sidebar-w: 264px;
+  --now-w: 384px;
+  --player-h: 84px;
+
+  --font: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--bg-app);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+#app {
+  height: 100vh;
+}
+
+button {
+  font-family: inherit;
+  color: inherit;
+  cursor: pointer;
+  border: none;
+  background: none;
+}
+
+input,
+select {
+  font-family: inherit;
+}
+
+::selection {
+  background: var(--accent-line);
+  color: #fff;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Barres de défilement discrètes (façon app de bureau). */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--surface-3) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--surface-2);
+  border-radius: var(--r-pill);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--surface-3);
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
