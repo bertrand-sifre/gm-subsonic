@@ -71,7 +71,12 @@ const STEMS_CACHE_FILE = join(MEDIA_DIR, 'stems.cache.json');
 // (ex. Gargoyle's Quest pistes 1/2/4/5… : `loop` null + `naturalLength` null -> fausse
 // durée 120 s « 2:00 », au lieu de boucles de ~33–72 s). Ordre : exact -> fini ->
 // tolérant -> fallback. Le bump force le recalcul des entrées GBS.
-const LOOP_CACHE_SCHEMA = 8;
+// Schéma 9 : l'étage TOLÉRANT détecte désormais l'INTRO (loopStart) au lieu de la forcer
+// à 0. Une piste intro+boucle (ex. Gargoyle's Quest piste 10 : intro ~1.8 s + boucle
+// 12.2 s) rejouait l'intro à chaque tour et sautait à la couture quand loopStart valait
+// 0 ; on retrouve la frontière intro->boucle via la mélodie brute (freq 11 bits) tolérante
+// au vibrato (detectModulatedLoopStart). Le bump force le recalcul des entrées GBS.
+const LOOP_CACHE_SCHEMA = 9;
 
 const FALLBACK_SECONDS = Number(process.env.VDM_FALLBACK_SECONDS ?? 120);
 const CONCURRENCY = 6;

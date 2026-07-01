@@ -260,6 +260,75 @@ export function analyzeFiniteEnd(fullStates, fps, opts = {}) {
 }
 
 /**
+ * loopStart d'une boucle MODULÉE (GBS) : frontière INTRO -> corps de boucle, à la
+ * période `p` déjà trouvée. Le match bit-exact de l'état complet ne suffit pas : le
+ * vibrato/enveloppe à phase libre le fait chuter à ~90 % DANS le corps (et crée de
+ * FAUX creux de tête sur certaines pistes). On TOLÈRE donc le micro-vibrato : une frame
+ * i « matche » i+p si l'état complet est égal OU si les fréquences 11 bits des 3 canaux
+ * coïncident à ±melodyTol près. L'intro est la zone de TÊTE où ce match reste bas (la
+ * mélodie n'y est pas encore celle qui se répète) ; loopStart = 1re frame d'où la
+ * moyenne glissante de match (fenêtre winSec) reste >= thr pendant guardSec d'affilée
+ * (les creux de vibrato du corps restent >= thr ; seule l'intro tombe en dessous).
+ *
+ * Sans `melodyFreq` (état interné seul), l'intro n'est pas distinguable de façon fiable
+ * -> 0 (la période reste la durée, comportement d'origine). Le match FULL-EXACT seul a
+ * été écarté : il invente de fausses intros (jusqu'à ~10 s) sur des pistes sans intro.
+ *
+ * @param {Int32Array|number[]} fullStates  un id d'ÉTAT complet des registres par frame
+ * @param {Int16Array|null} melodyFreq      fréquences 11 bits à plat (3/frame) ou null
+ * @param {number} melodyTol                tolérance ± sur la fréquence (micro-vibrato)
+ * @param {number} fps                      frame-rate autoritaire (Hz)
+ * @param {number} p                        période de boucle en frames
+ * @param {object} [o]                      winSec/guardSec/thr
+ * @returns {number}  loopStart en frames (0 si pas d'intro franche / pas de mélodie)
+ */
+function detectModulatedLoopStart(fullStates, melodyFreq, melodyTol, fps, p, o = {}) {
+  if (!melodyFreq) return 0;
+  const { winSec = 1, guardSec = 2, thr = 0.9 } = o;
+  const N = fullStates.length;
+  const lim = N - p;
+  if (lim <= 0) return 0;
+  const W = Math.max(1, Math.round(winSec * fps));
+  const guard = Math.round(guardSec * fps);
+
+  // match[i] : frame i ≈ frame i+p (état exact OU 3 fréquences à ±tol près).
+  const m = new Uint8Array(lim);
+  for (let i = 0; i < lim; i++) {
+    let ok = fullStates[i] === fullStates[i + p];
+    if (!ok) {
+      ok = true;
+      const a = 3 * i;
+      const b = 3 * (i + p);
+      for (let c = 0; c < 3; c++) {
+        if (Math.abs(melodyFreq[a + c] - melodyFreq[b + c]) > melodyTol) { ok = false; break; }
+      }
+    }
+    m[i] = ok ? 1 : 0;
+  }
+
+  // Moyenne glissante AVANT (fenêtre W) du match, sans réallouer (somme glissante).
+  const F = new Float64Array(lim);
+  let acc = 0;
+  const w0 = Math.min(W, lim);
+  for (let k = 0; k < w0; k++) acc += m[k];
+  for (let i = 0; i + W <= lim; i++) {
+    F[i] = acc / W;
+    acc -= m[i];
+    if (i + W < lim) acc += m[i + W];
+  }
+
+  // 1re frame d'où F reste >= thr pendant guard frames d'affilée (= entrée dans le corps).
+  const top = lim - W;
+  for (let L = 0; L < top; L++) {
+    let stable = true;
+    const end = Math.min(L + guard, top);
+    for (let j = L; j < end; j++) { if (F[j] < thr) { stable = false; break; } }
+    if (stable) return L;
+  }
+  return 0;
+}
+
+/**
  * Détection de boucle TOLÉRANTE pour les drivers à MODULATION CONTINUE (GBS).
  *
  * Pourquoi : analyzeStates exige une répétition BIT-EXACTE et CONTIGUË du log
@@ -286,13 +355,17 @@ export function analyzeFiniteEnd(fullStates, fps, opts = {}) {
  * ci-dessous (queue appariée >= minDistinctFrames états distincts) est une défense en
  * profondeur, mais l'ORDRE du pipeline (fini AVANT tolérant) reste la garde primaire.
  *
- * loopStart : laissé à 0 (la période EST la durée). Détecter une vraie intro sous
- * modulation est non fiable ; pour une piste sans intro (cas dominant) c'est exact, et
- * la DURÉE de boucle — l'enjeu du « 2:00 » — est juste dans tous les cas.
+ * loopStart : si `melodyFreq` est fourni (fréquences 11 bits par frame, cf. gdm-loop),
+ * on détecte l'INTRO via detectModulatedLoopStart (frontière tête non-répétitive ->
+ * corps de boucle, match TOLÉRANT au vibrato). Sinon loopStart = 0 (la période EST la
+ * durée) : une piste sans intro reste exacte, et la DURÉE — l'enjeu du « 2:00 » — est
+ * juste dans tous les cas. Détecter l'intro corrige les pistes intro+boucle dont le
+ * raccord, avec loopStart=0, rejouait l'intro et sautait à la couture (ex. Gargoyle's
+ * Quest piste 10 : intro ~1.8 s + boucle 12.2 s).
  *
  * @param {Int32Array|number[]} fullStates  un id d'ÉTAT complet des registres par frame
  * @param {number} fps                      frame-rate autoritaire (Hz)
- * @param {object} [opts]                   sampleRate/pminSec/pmaxSec/tailGuardSec/matchWinSec/matchThreshold/minDistinctFrames
+ * @param {object} [opts]                   sampleRate/pminSec/pmaxSec/tailGuardSec/matchWinSec/matchThreshold/minDistinctFrames/melodyFreq/melodyTol
  * @returns {{ startSeconds, lengthSeconds, startSamples, lengthSamples, sampleRate, frameRate } | null}
  */
 export function analyzeStatesTolerant(fullStates, fps, opts = {}) {
@@ -304,6 +377,10 @@ export function analyzeStatesTolerant(fullStates, fps, opts = {}) {
     matchWinSec = 60, // fenêtre de queue sur laquelle on mesure la fraction de match
     matchThreshold = 0.6, // seuil validé : vraies boucles >= 65 %, sous-périodes <= 52 %
     minDistinctFrames = 8,
+    // Fréquences 11 bits par frame (3 canaux à plat : ch1,ch2,ch3,ch1,…) — permet la
+    // détection d'intro tolérante au vibrato. Absent -> loopStart=0 (rétro-compatible).
+    melodyFreq = null,
+    melodyTol = 4, // ± unités tolérées sur la fréquence 11 bits (micro-vibrato)
   } = opts;
 
   const H = fullStates;
@@ -356,7 +433,9 @@ export function analyzeStatesTolerant(fullStates, fps, opts = {}) {
   }
   if (seen.size < minDistinctFrames) return null;
 
-  const loopStartFrames = 0; // pas de détection d'intro sous modulation : période = durée
+  // loopStart : frontière intro -> corps de boucle (tolérant au vibrato via melodyFreq) ;
+  // 0 si pas de mélodie fournie ou pas d'intro franche -> la période est la durée.
+  const loopStartFrames = detectModulatedLoopStart(H, melodyFreq, melodyTol, fps, pStar);
   return {
     startSeconds: +(loopStartFrames / fps).toFixed(4),
     lengthSeconds: +(pStar / fps).toFixed(4),

@@ -93,7 +93,15 @@ function run(cmd, args, timeoutMs) {
  * d'état, cf. analyzeFiniteEnd) — pas de l'index de dernière écriture, trompeur sur
  * les drivers qui ré-écrivent le silence à chaque frame.
  *
- * @returns {{ delta: Int32Array, full: Int32Array, fps: number } | null}
+ *  - freq  : fréquences 11 bits des canaux 1/2/3 par frame (à plat, 3 valeurs/frame :
+ *            ch1,ch2,ch3,ch1,…) — la MÉLODIE brute, robuste au micro-vibrato à ±tol
+ *            près ; sert à la détection d'INTRO de l'étage tolérant (cf. nsf-loop).
+ * Le compteur `frames=N` de l'en-tête lève l'ambiguïté du newline final de split.
+ * La durée d'une piste FINIE se déduit ensuite de `full` (dernier changement
+ * d'état, cf. analyzeFiniteEnd) — pas de l'index de dernière écriture, trompeur sur
+ * les drivers qui ré-écrivent le silence à chaque frame.
+ *
+ * @returns {{ delta: Int32Array, full: Int32Array, freq: Int16Array, fps: number } | null}
  */
 function parseRegLog(stdout) {
   const lines = stdout.split('\n');
@@ -107,6 +115,7 @@ function parseRegLog(stdout) {
   const sIds = new Map();
   const delta = new Int32Array(N);
   const full = new Int32Array(N);
+  const freq = new Int16Array(3 * N); // fréquence 11 bits ch1/2/3 par frame (à plat)
   const reg = new Uint8Array(48); // état courant des 48 registres APU (FF10..FF3F)
   for (let f = 0; f < N; f++) {
     const line = lines[1 + f] ?? ''; // frame sans écriture -> ligne vide
@@ -122,8 +131,12 @@ function parseRegLog(stdout) {
     let sId = sIds.get(key);
     if (sId === undefined) { sId = sIds.size; sIds.set(key, sId); }
     full[f] = sId;
+    // Fréquences 11 bits : NRx3 (lo) + 3 bits bas de NRx4 (hi). Offsets depuis 0xFF10.
+    freq[3 * f] = ((reg[0x04] & 7) << 8) | reg[0x03]; // canal 1 (carré)
+    freq[3 * f + 1] = ((reg[0x09] & 7) << 8) | reg[0x08]; // canal 2 (carré)
+    freq[3 * f + 2] = ((reg[0x0e] & 7) << 8) | reg[0x0d]; // canal 3 (wave)
   }
-  return { delta, full, fps };
+  return { delta, full, freq, fps };
 }
 
 /**
@@ -158,7 +171,7 @@ export async function detectLoop({ sourcePath, trackIndex, gdm = 'gdm' }) {
 
   const parsed = parseRegLog(r.stdout);
   if (!parsed) return { loop: null, naturalLengthSeconds: null }; // en-tête absente / invalide
-  const { delta, full, fps } = parsed;
+  const { delta, full, freq, fps } = parsed;
 
   // Pipeline à 3 étages, du plus sûr au plus permissif :
   //
@@ -171,7 +184,8 @@ export async function detectLoop({ sourcePath, trackIndex, gdm = 'gdm' }) {
   //     finie matcherait à toute période (fausse micro-boucle).
   //  3) TOLÉRANT (analyzeStatesTolerant sur full) — boucle MODULÉE : vibrato/enveloppe/
   //     panning à phase libre cassent l'égalité bit-exacte de l'étage 1 alors que la
-  //     piste boucle franchement (cas Gargoyle's Quest). Autocorrélation fractionnaire.
+  //     piste boucle franchement (cas Gargoyle's Quest). Autocorrélation fractionnaire ;
+  //     l'INTRO est retrouvée via `freq` (mélodie brute tolérante au vibrato).
   //
   // L'importeur arbitre ensuite selon `loop` (présent -> boucle, sinon naturalLength).
   let loop = analyzeStates(delta, fps, { ignoreFirstFrameMismatch: true, refineStates: full });
@@ -180,7 +194,7 @@ export async function detectLoop({ sourcePath, trackIndex, gdm = 'gdm' }) {
   if (!loop) {
     naturalLengthSeconds = analyzeFiniteEnd(full, fps); // étage 2 : piste finie
     if (naturalLengthSeconds == null) {
-      loop = analyzeStatesTolerant(full, fps); // étage 3 : boucle modulée
+      loop = analyzeStatesTolerant(full, fps, { melodyFreq: freq }); // étage 3 : boucle modulée + intro
       if (loop) method = 'tolerant';
     }
   }
